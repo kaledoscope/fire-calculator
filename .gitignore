@@ -1,0 +1,46 @@
+# ── 个人数据：永不入库 ──────────────────────────────
+# 宪法「密钥与个人信息的边界」：配置含持仓与金额，属个人数据
+config.json
+config.*.json
+!config.example.json
+# 实际保存的配置落在这里（storage.py 的默认目录），同样含持仓与金额。
+# 注意 `data/` 整目录不能忽略 —— 里面的 .gitkeep 要让目录进仓库。
+data/configs/*
+!data/configs/.gitkeep
+
+# ── 运行态目录 ──────────────────────────────────────
+.state/
+.logs/
+*.log
+
+# ── 数据缓存 ────────────────────────────────────────
+.cache/
+data/cache/
+
+# ── Python ──────────────────────────────────────────
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# ── Node / Svelte ───────────────────────────────────
+node_modules/
+dist/
+.vite/
+
+# ── 编辑器 / 系统 ───────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+
+# SSR 渲染自检的中间产物
+.ssrout/
+
+# ── 内部文档：不随公开仓库走 ─────────────────────────
+# CLAUDE.md 是本地 AI 协作规则，且开头引用了本仓库**之外**的私有工作空间
+# （`../CLAUDE.md`、`../CONSTITUTION.md`），公开出去既是死链也暴露内部结构。
+# 另两份是内部笔记。对外的那份是 REQUIREMENTS.md（需求规格 + 公式推导）。
+CLAUDE.md
+设想.md
+NOTES-素材库.md

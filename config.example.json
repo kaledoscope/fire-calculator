@@ -1,0 +1,115 @@
+{
+  "market": "US",
+  "display_currency": "USD",
+  "assets": [
+    {
+      "symbol": "SCHD",
+      "target_weight": 0.6,
+      "shares": 100,
+      "price": 28,
+      "params": {
+        "price_growth": 0.05,
+        "dividend_yield": 0.035,
+        "dividend_growth": 0.06,
+        "expense_ratio": 0,
+        "source": "manual",
+        "lookback_years": 10
+      }
+    },
+    {
+      "symbol": "NVDA",
+      "target_weight": 0.3,
+      "shares": 20,
+      "price": 180,
+      "params": {
+        "price_growth": 0.12,
+        "dividend_yield": 0.001,
+        "dividend_growth": 0.15,
+        "expense_ratio": 0,
+        "source": "manual",
+        "lookback_years": 10
+      }
+    }
+  ],
+  "cash": {
+    "annual_rate": 0.02
+  },
+  "tax": {
+    "dividend_tax": 0.1,
+    "capital_gains_tax": 0
+  },
+  "plan": {
+    "segments": [
+      {
+        "months": 120,
+        "monthly": {
+          "SCHD": 1200,
+          "NVDA": 800
+        }
+      }
+    ]
+  },
+  "fire": {
+    "tiers": [
+      {
+        "name": "Lean",
+        "annual_expense": 30000,
+        "multiple": 25
+      },
+      {
+        "name": "Regular",
+        "annual_expense": 60000,
+        "multiple": 25
+      },
+      {
+        "name": "Fat",
+        "annual_expense": 120000,
+        "multiple": 25
+      }
+    ],
+    "milestones": [
+      {
+        "label": "$10,000",
+        "kind": "fixed",
+        "amount": 10000
+      },
+      {
+        "label": "$100,000",
+        "kind": "fixed",
+        "amount": 100000
+      },
+      {
+        "label": "$250,000",
+        "kind": "fixed",
+        "amount": 250000
+      },
+      {
+        "label": "$500,000",
+        "kind": "fixed",
+        "amount": 500000
+      },
+      {
+        "label": "$1,000,000",
+        "kind": "fixed",
+        "amount": 1000000
+      }
+    ],
+    "coast": {
+      "annual_expense": 60000,
+      "multiple": 25,
+      "years_to_retirement": 20,
+      "growth_rate": 0.07
+    },
+    "barista": {
+      "annual_expense": 60000,
+      "part_time_income": 20000,
+      "multiple": 25
+    }
+  },
+  "settings": {
+    "horizon_months": 360,
+    "dividend_mode": "drip",
+    "rebalance_annually": true,
+    "inflation_rate": 0.025
+  }
+}

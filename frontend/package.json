@@ -1,0 +1,19 @@
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check:render": "vite build --ssr scripts/render-check.js --outDir .ssrout --logLevel error && node .ssrout/render-check.js",
+    "check:e2e": "node scripts/check-e2e.mjs"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "svelte": "^5.57.0",
+    "vite": "^8.3.0",
+    "playwright": "^1.63.0"
+  }
+}
