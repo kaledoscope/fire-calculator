@@ -544,6 +544,29 @@ def _fetch_dividends(
 # 参数提取 —— 从历史序列反推 AssetParams
 # ══════════════════════════════════════════════════════════════════
 
+# 每年派息笔数的上限。只是防脏数据的兜底，不是对派息频率的假设 ——
+# 真按周派也就 52 笔。早先这里写的是 12（「最多月度」），把 MAIN 的
+# 16 笔压成了 12 笔，见 `_payments_per_year`。
+_MAX_PAYMENTS_PER_YEAR = 53
+
+# 用于测量股息增长的**区间**短于这个年数，就不给增长率。
+#
+# 注意卡的是「测量区间」而不是「派息记录长度」—— 两者差着一年多，卡错的
+# 那个数会漏掉真正该拦的标的。VFLO 的派息记录有 3.17 年，听着够了，但它
+# 每年派 12 笔，要凑出两个「完整年度」来对比，最早那个窗口只能落在
+# 2.24 年前 —— 真正拿去算增长的自始至终只有 2.24 年，于是年化出 26.6%。
+#
+# 这个数不是「VFLO 的股息涨得快」，是「拿一个还没定型的派息政策外推 30 年」。
+# 新基金的派息额在头几年是往上爬的（VFLO 头一笔 $0.00285），这个爬坡是
+# 建仓过程，不是趋势。年化会把爬坡放大成复利，噪音就变成了参数。
+#
+# 三年是个诚实的下限：短于它，区间内的季节性都抵消不干净 —— VFLO 那
+# 2.24 年里，起点窗口圈进一个十二月，终点窗口圈进两个九月。
+#
+# 不够就报 0：0 是保守且可解释的（模型按股息不增长推演），用户想改可以手输
+# （SDP-2）。而 26.6% 是编的。实际跨度由 `dividend_growth_span_years` 报给界面。
+MIN_DIVIDEND_GROWTH_YEARS = 3.0
+
 
 def _annualised_price_growth(prices: list[tuple[date, float]]) -> float:
     """价格年化增长：对 ln(价格) 做最小二乘回归，取斜率。
@@ -574,18 +597,47 @@ def _annualised_price_growth(prices: list[tuple[date, float]]) -> float:
 
 
 def _payments_per_year(dates: list[date]) -> int:
-    """从派息日期的间隔推断每年派几次。
+    """每年派几次股息。
 
-    取间隔的**中位数**而不是平均值：偶有一次特别分红或跳过一次派息，
-    平均值会被带偏，中位数不会。
+    **数完整自然年的笔数，不看间隔。** 早先版本按派息间隔的中位数反推，
+    还额外压了一个 `min(12, …)` 的上限，理由是「最多就是月度派息」——
+    这两个假设都不成立。MAIN 是「每月 $0.265 + 每季补充 $0.30」= **16 笔/年**，
+    两种节奏交错之后间隔里既有 14 天也有一堆 30 天，中位数反推出 13~21 的
+    任意值，再被压成 12。于是末尾那个「最近 12 笔」的窗口只覆盖了 9 个月，
+    TTM 少算一个季度，股息率 7.8% 被报成 5.9%。
+
+    一整年里派了几笔是**直接数出来**的，与间隔怎么分布无关，也不需要
+    假设派息频率的上限。
+
+    首年与末年不数：首年从上市或数据起点开始，末年还没过完，两者都是半截，
+    拿半截年份去数只会数少。所以只数中间那些完整年份。
+
+    取众数而不是平均值：偶发的一次特别派息只影响当年（VFLO 的 2024 年有
+    13 笔，其余年份 12 笔），不影响多数年份。众数打平时取**小**的那个 ——
+    多出来的那一笔更可能是特别派息，不该让它把每年的基准笔数抬高。
+
+    派息历史不足两个自然年时（新上市标的），退回间隔推断：拿不到完整年份，
+    但至少不能凭空返回 1。
     """
     if len(dates) < 2:
         return 1
-    gaps = sorted((b - a).days for a, b in zip(dates, dates[1:]))
+    ordered = sorted(dates)
+
+    tally: dict[int, int] = {}
+    for year in range(ordered[0].year + 1, ordered[-1].year):
+        count = sum(1 for d in ordered if d.year == year)
+        if count:
+            tally[count] = tally.get(count, 0) + 1
+    if tally:
+        # 先比出现次数（多者胜），再比笔数（小者胜）
+        best = min(tally.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        return max(1, min(_MAX_PAYMENTS_PER_YEAR, best))
+
+    gaps = sorted((b - a).days for a, b in zip(ordered, ordered[1:]))
     median = gaps[len(gaps) // 2]
     if median <= 0:
         return 1
-    return max(1, min(12, round(365.25 / median)))
+    return max(1, min(_MAX_PAYMENTS_PER_YEAR, round(365.25 / median)))
 
 
 def _trailing_annual_series(
@@ -610,8 +662,16 @@ def _trailing_annual_series(
 
 def _annualised_dividend_growth(
     dividends: list[tuple[date, float]], max_years: int
-) -> float:
+) -> tuple[float, float] | None:
     """股息年化增长：比较两个**完整**年度的派息合计。
+
+    返回 `(增长率, 实际跨度年数)`；**跨度要一起返回**，因为能不能信这个
+    增长率，取决于它是跨多久量出来的 —— 见 `MIN_DIVIDEND_GROWTH_YEARS`。
+    光返回一个 float，调用方就无从判断该不该拦。
+
+    返回 `None` 表示**凑不出可比区间**（股息历史太短，或数据有洞）。
+    这和「算出来是 0」是两件事：前者是「不知道」，后者是「知道，就是不涨」。
+    早先两者共用 0.0，界面于是把「测不了」显示成「不增长」。
 
     只在窗口完整时才取用（索引 ≥ per_year−1，即已经攒够一整年的派息）。
     股息历史常比价格历史短得多 —— 缓存里 SCHD 只有约 5 年 —— 所以取
@@ -619,17 +679,17 @@ def _annualised_dividend_growth(
     总好过拿半截窗口去比、把增长率算高。
     """
     if not dividends:
-        return 0.0
+        return None
 
     per_year = _payments_per_year([d for d, _ in dividends])
     # 至少要 per_year + 1 笔，否则连两个完整年度都凑不出来
     if len(dividends) < per_year + 1:
-        return 0.0
+        return None
 
     series = _trailing_annual_series(dividends, per_year)
     latest_date, latest_value = series[-1]
     if latest_value <= 0:
-        return 0.0
+        return None
 
     best: tuple[float, float] | None = None  # (years, value)
     for index in range(per_year - 1, len(series) - 1):
@@ -644,10 +704,10 @@ def _annualised_dividend_growth(
             best = (years, value)
 
     if best is None:
-        return 0.0
+        return None
 
     years, earlier = best
-    return (latest_value / earlier) ** (1.0 / years) - 1.0
+    return (latest_value / earlier) ** (1.0 / years) - 1.0, years
 
 
 def derive_params(
@@ -669,26 +729,57 @@ def derive_params(
     if not prices:
         raise ValueError("没有价格数据，无法提取参数")
 
-    window_start = prices[-1][0] - timedelta(days=int(lookback_years * 365.25) + 5)
+    # ── 先砍掉还没派发的股息 ────────────────────────────────────
+    #
+    # 数据源会把**已宣告但尚未除息**的股息一并返回：实测 MAIN 的响应里有
+    # 2026-10-08 / 11-06 / 12-08 三笔，而抓取当天是 09-25。留着它们，TTM
+    # 合计就把还没到账的钱算成了已到账，股息率虚高；对比跨度也被拉长。
+    #
+    # 边界取**最后一根 K 线的日期**而不是 `date.today()`：
+    #   1. 它就是这份数据的「现在」—— 缓存可能是上周抓的，用今天的日期去
+    #      过滤，同一份缓存隔几天会算出不同的数；
+    #   2. 收在这里意味着抓取路径和读缓存路径**都**会过滤（两条路径都走
+    #      `derive_params`），否则已经落盘的旧缓存会继续错下去。
+    as_of = prices[-1][0]
+    dividends = [(d, a) for d, a in dividends if d <= as_of]
+
+    window_start = as_of - timedelta(days=int(lookback_years * 365.25) + 5)
     window = [(d, c) for d, c in prices if d >= window_start] or prices
     history_years = (window[-1][0] - window[0][0]).days / 365.25
 
     latest_close = prices[-1][1]
+    dividend_growth = 0.0
+    growth_span: float | None = None
+    insufficient = False
     if dividends:
         per_year = _payments_per_year([d for d, _ in dividends])
         trailing = _trailing_annual_series(dividends, per_year)[-1][1]
+        pair = _annualised_dividend_growth(dividends, lookback_years)
+        if pair is None:
+            # 有派息记录，却连一个可比区间都凑不出来 —— 这是「测不了」
+            insufficient = True
+        else:
+            dividend_growth, growth_span = pair
+            if growth_span < MIN_DIVIDEND_GROWTH_YEARS:
+                # 区间太短，量出来的增长率是建仓爬坡的放大，不是趋势。
+                # 报 0 而不是报一个编出来的数。
+                dividend_growth, insufficient = 0.0, True
     else:
+        # 不派息的标的：股利率 0，增长率无从谈起。**不设** insufficient ——
+        # 「不派息」和「派息史太短」是两件事，前者不是缺陷，不该弹提示。
         trailing = 0.0
     yield_ = trailing / latest_close if latest_close > 0 else 0.0
 
     return AssetParams(
         price_growth=_annualised_price_growth(window),
         dividend_yield=max(0.0, yield_),
-        dividend_growth=_annualised_dividend_growth(dividends, lookback_years),
+        dividend_growth=dividend_growth,
         expense_ratio=0.0,  # A23：抓取模式强制为 0，由模型校验兜底
         source=ParamSource.FETCHED,
         lookback_years=lookback_years,
         history_years=history_years,
+        dividend_growth_span_years=growth_span,
+        dividend_growth_insufficient_history=insufficient,
     )
 
 

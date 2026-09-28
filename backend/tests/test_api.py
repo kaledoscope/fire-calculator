@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from backend import datafeed, storage
 from backend.main import app
+from backend.market_calendar import last_completed_trading_day
 from backend.models import Config
 
 
@@ -26,6 +27,19 @@ def client(tmp_path, monkeypatch) -> TestClient:
     )
     monkeypatch.setattr(datafeed, "CACHE_DIR", tmp_path / "cache")
     return TestClient(app)
+
+
+def _bars_ending_on_the_last_close(count: int = 261, step_days: int = 7):
+    """价格序列，末根 K 线落在**最近一个已收盘的交易日**上。
+
+    HTTP 层注入不了 `now`（`get_quote` 的 `now` 参数只在下层测试里用得上），
+    所以这里必须自己对准「今天」。写死日期的话，缓存新鲜度判据
+    「末根 K 线 ≥ 最近收完的交易日」会随日历翻页失效 —— 到那天第二个请求
+    又去抓一遍，`from_cache` 恒为 False，测试**在某一天自己变红**，
+    而不是当时就报错。实测 2026-09-24 写死的那份，到 09-28 就红了。
+    """
+    end = last_completed_trading_day(datetime.now(timezone.utc))
+    return [(end - timedelta(days=step_days * i), 100.0 + i) for i in range(count)]
 
 
 SAMPLE_CONFIG = {
@@ -243,9 +257,7 @@ def test_quote_returns_params_through_http(client: TestClient, monkeypatch) -> N
 def test_second_quote_request_hits_cache(client: TestClient, monkeypatch) -> None:
     """★ 用户要求的核心行为：第二个请求不该再打 API。"""
     calls: list[str] = []
-    prices = [
-        (date(2026, 9, 24) - timedelta(days=7 * i), 100.0 + i) for i in range(261)
-    ]
+    prices = _bars_ending_on_the_last_close()
     rows = [{"date": d.strftime("%m/%d/%Y"), "close": f"${c:.2f}"} for d, c in prices]
 
     def fake_get(url: str) -> str:

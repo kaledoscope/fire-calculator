@@ -655,6 +655,125 @@ ok(
 await portfolio.locator('.chevron').click()
 await page.waitForTimeout(700)
 
+// ══ ⑬ 股息增长率：测不了 ≠ 不增长 ═══════════════════════════════
+// VFLO 2023 年才成立，派息记录 3.2 年，但**真正能拿去量增长的区间**只有
+// 2.24 年 —— 月度派息要攒够 12 笔才开得了一个窗口，最早那个窗口只能落在
+// 一年前。那 2.24 年正好是它的建仓爬坡期，年化出来 26.6%，拿去复利 30 年
+// 就是拿噪音当趋势。
+//
+// 后端现在报 0 并带上 `dividend_growth_insufficient_history`。界面必须把
+// **「测不了」和「测出来不涨」分开说** —— 两者数值一样、含义相反。混为
+// 一谈，用户会以为这个标的的股息真的不增长，那是另一回事。
+//
+// 标志位用拦截响应来造，不等真实数据：真实标的的标志位会随数据源更新而
+// 变化（VFLO 再攒一年就够 3 年了），用例就成了看别人脸色。
+const quoteWith = (params) => ({
+  symbol: 'TEST',
+  available: true,
+  params: {
+    price_growth: 0.05,
+    dividend_yield: 0.013,
+    dividend_growth: 0,
+    expense_ratio: 0.0,
+    source: 'fetched',
+    lookback_years: 10,
+    history_years: 3.26,
+    dividend_growth_span_years: 2.24,
+    dividend_growth_insufficient_history: false,
+    ...params,
+  },
+  name: 'Test Fund',
+  asset_class: 'etf',
+  last_price: 100,
+  as_of: '2026-09-25',
+  fetched_at: '2026-09-28T11:54:50+00:00',
+  from_cache: true,
+  source: 'stockanalysis',
+  known: true,
+  expense_ratio_info: null,
+  lookback_years: 10,
+  reason: null,
+  failure: null,
+})
+
+// `symbol` 必须每次都不一样：输入框里已是同一个代码时，值没变，
+// 浏览器就**不派发 change**，`onSymbolChange` 不跑，抓取根本没发生 ——
+// 于是第二次读到的还是上一次的结果。这条踩过一次。
+async function quoteNoteFor(symbol, params) {
+  await page.route('**/api/quote/**', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ...quoteWith(params), symbol }),
+    }),
+  )
+  await symInput.fill(symbol)
+  await symInput.blur()
+  await waitForQuote(1)
+  // 说明在「增长参数」折叠面板里，收着的时候读不到 —— 先展开。
+  // 上一节刚刷新过页面，折叠状态是收起的。
+  const toggle = card(1).locator('button.ghost.small', { hasText: '增长参数' })
+  if ((await toggle.innerText()).includes('▸')) {
+    await toggle.click()
+    await page.waitForTimeout(300)
+  }
+  await page.waitForTimeout(600)
+  const cardText = await card(1).innerText()
+  await page.unroute('**/api/quote/**')
+  return cardText
+}
+
+const shortSpan = await quoteNoteFor('VFLX', {
+  dividend_growth_insufficient_history: true,
+})
+ok('区间太短时说明「测不了」，而不是默不作声', /测不了/.test(shortSpan), shortSpan)
+ok('说明里点出实测区间有多长（2.2 年）', /2\.2 年/.test(shortSpan), shortSpan)
+ok('说明里说清这不是「不增长」', /不是「测出来不涨」/.test(shortSpan), shortSpan)
+ok(
+  '说明里给出路：可以自己填',
+  /直接改这个框/.test(shortSpan),
+  shortSpan,
+)
+
+// 量像素，不靠肉眼：一句新文案最容易出的两种毛病是**横向顶出卡片**和
+// **染成红色**。前者只有量盒子才发现，后者只有比颜色才发现。
+async function divNoteGeometry() {
+  return page.evaluate(() => {
+    const p = document.querySelectorAll('.asset')[1].querySelector('.div-note')
+    if (!p) return null
+    const card = p.closest('.card') ?? p.closest('.asset')
+    const probe = document.createElement('span')
+    probe.style.color = 'var(--negative)'
+    document.body.appendChild(probe)
+    const red = getComputedStyle(probe).color
+    probe.remove()
+    const line = parseFloat(getComputedStyle(p).lineHeight) || 17
+    return {
+      color: getComputedStyle(p).color,
+      red,
+      overflowsRight: Math.round(p.getBoundingClientRect().right - card.getBoundingClientRect().right),
+      clipped: p.scrollWidth - p.clientWidth,
+      lines: Math.round(p.getBoundingClientRect().height / line),
+    }
+  })
+}
+
+for (const vp of [1440, 900]) {
+  await page.setViewportSize({ width: vp, height: 1000 })
+  await page.waitForTimeout(250)
+  const g = await divNoteGeometry()
+  ok(`${vp}px：说明没顶出卡片，也没被切掉`, g !== null && g.overflowsRight <= 1 && g.clipped <= 1, JSON.stringify(g))
+  // 和 .src-missing 同一个道理：它是说明，不是错误，所以**不能**用 --negative
+  ok(`${vp}px：说明是灰的，不是红的`, g !== null && g.color !== g.red, g && `${g.color} / 红 ${g.red}`)
+  ok(`${vp}px：说明换行后高度正常（不是 0 行也不是一行挤爆）`, g !== null && g.lines >= 2, g && `${g.lines} 行`)
+}
+await page.setViewportSize({ width: 1440, height: 1000 })
+
+const longSpan = await quoteNoteFor('SCHX', {
+  dividend_growth_insufficient_history: false,
+})
+ok('区间够长时不出现这句话', !/测不了/.test(longSpan), longSpan)
+
 // ══ 收尾 ═════════════════════════════════════════════════════════
 ok('全程无控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '))
 

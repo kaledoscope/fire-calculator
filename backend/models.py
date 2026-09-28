@@ -81,6 +81,26 @@ class AssetParams(BaseModel):
             "去描述一份只有 3 年的数据。None 表示未记录（老数据）。"
         ),
     )
+    dividend_growth_span_years: float | None = Field(
+        None,
+        description=(
+            "**测量 `dividend_growth` 所用的区间长度**（年）。"
+            "注意这不是「派息记录有多长」—— 后者更长，且更具误导性："
+            "VFLO 有 3.17 年派息记录，但每年派 12 笔，凑两个完整年度去对比时，"
+            "最早那个窗口只能落在 2.24 年前，真正量出 26.6% 的区间就是 2.24 年。"
+            "界面解释「为什么没给增长率」时要引用的是这个数。"
+            "None 表示没有派息记录，或未记录（老数据）。"
+        ),
+    )
+    dividend_growth_insufficient_history: bool = Field(
+        False,
+        description=(
+            "`dividend_growth` 是不是**因为派息历史太短而没测**，而不是测出来"
+            "真的是 0。两者数值相同、含义相反：前者是「不知道」，后者是「知道，"
+            "就是不涨」。界面必须分开说 —— 把「不知道」写成 0，用户会以为"
+            "这份标的的股息确实不增长。"
+        ),
+    )
 
     @model_validator(mode="after")
     def _expense_ratio_rule(self) -> AssetParams:

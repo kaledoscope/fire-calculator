@@ -184,6 +184,11 @@
           assetClass: q.asset_class,
           lookbackYears: q.lookback_years,
           historyYears: q.params?.history_years ?? null,
+          // 股息增长率的来龙去脉。**这两个数只用于说明，不进计算** ——
+          // 和 historyYears 一样挂在 quote 上，不写进 asset.params：
+          // 它们描述的是「这次抓取量得准不准」，不是标的的属性。
+          divGrowthSpan: q.params?.dividend_growth_span_years ?? null,
+          divGrowthShort: q.params?.dividend_growth_insufficient_history === true,
         })
       }
       next.known = q.known
@@ -483,6 +488,20 @@
             </div>
           </div>
 
+          {#if quote?.divGrowthShort && !(asset.params.dividend_growth > 0)}
+            <!-- 股息增长率是 0，但这个 0 的**来路**必须说清：不是「测出来不涨」，
+                 是「派息记录太短，测不了」。两者数值相同、含义相反 —— 混为
+                 一谈，用户会以为这个标的的股息真的不增长。
+                 用户自己填了非 0 的值就不再提，那时这个说明已经没用了。 -->
+            <p class="tiny div-note">
+              股息年增长填 0 是因为<strong>测不了</strong>，不是「测出来不涨」——
+              {#if quote.divGrowthSpan}
+                可用于对比的派息区间只有 {quote.divGrowthSpan.toFixed(1)} 年，
+              {/if}
+              这么短的区间量出来的增长率是新基金的建仓爬坡，不是趋势。想按自己的判断推演，直接改这个框。
+            </p>
+          {/if}
+
           {#if asset.params.source !== 'manual'}
             <p class="tiny fee-note">
               抓取模式下费用率强制为 0 —— ETF 管理费已从基金资产中每日扣除，
@@ -490,7 +509,7 @@
             </p>
           {:else}
             <p class="tiny fee-note">
-              手输的是**指数**回报时才需要填费用率；若填的是 ETF 自身历史回报，留 0。
+              手输的是<strong>指数</strong>回报时才需要填费用率；若填的是 ETF 自身历史回报，留 0。
             </p>
           {/if}
         {/if}
@@ -626,6 +645,14 @@
   }
 
   .fee-note {
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* 股息增长率「测不了」的说明。和 .src-missing 一样**不用 --negative**：
+     0 是保守且正确的输出（模型按股息不增长推演），这里只是把它的来路
+     补完整 —— 它是说明，不是错误。 */
+  .div-note {
     margin-top: 6px;
     line-height: 1.4;
   }

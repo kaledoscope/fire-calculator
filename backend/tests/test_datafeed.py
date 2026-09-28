@@ -189,6 +189,31 @@ def _quarterly(start: date, count: int, amount: float) -> list[tuple[date, float
     return [(start + timedelta(days=91 * i), amount) for i in range(count)]
 
 
+def _year_of_payments(
+    year: int, count: int = 12, amount: float = 0.25, day: int = 15
+) -> list[tuple[date, float]]:
+    """某一年里均匀铺 `count` 笔派息，**全部落在本年内**。
+
+    派息频率的判据是「完整自然年里有几笔」，所以测试数据必须让每一年的
+    笔数是确定的 —— 用固定的 30 天/91 天步长会跨年漂移，某年 12 笔、
+    下一年 13 笔，测出来的频率就成了碰运气。
+    """
+    step = 360 // count
+    return [
+        (date(year, 1, day) + timedelta(days=step * i), amount) for i in range(count)
+    ]
+
+
+def _years_of_payments(
+    first: int, last: int, count: int = 12, base: float = 0.25, growth: float = 0.0
+) -> list[tuple[date, float]]:
+    """`first`..`last` 每个自然年 `count` 笔，金额逐年按 `growth` 递增。"""
+    out: list[tuple[date, float]] = []
+    for year in range(first, last + 1):
+        out += _year_of_payments(year, count, base * (1.0 + growth) ** (year - first))
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════
 # 金额解析
 # ══════════════════════════════════════════════════════════════════
@@ -322,12 +347,64 @@ def test_payments_per_year_inference(gap_days: int, expected: int):
     assert _payments_per_year(dates) == expected
 
 
-def test_payments_per_year_uses_median_not_mean():
-    """偶有一次特别派息不该改变频率判断。"""
+def test_payments_per_year_survives_a_mixed_cadence():
+    """回归测试：MAIN 式的「月度 + 季度补充」= 16 笔/年。
+
+    12 笔月度（每月 15 日）+ 4 笔季度补充（3/6/9/12 月的 28 日）。
+    早年按**派息间隔的中位数**反推，这个间隔分布给出 13（既有 13 天的
+    密集段，也有 31 天的稀疏段），再被 `min(12, …)` 压成 12。于是末尾
+    那个「最近 12 笔」的窗口只覆盖 9 个月 —— TTM 少算一个季度，
+    股息率 7.8% 被报成 5.9%。
+
+    数完整自然年的笔数就没有这个问题：一年里派了几笔是数出来的，
+    与间隔怎么分布无关。
+    """
+    dates: list[date] = []
+    for year in range(2022, 2026):
+        dates += [date(year, month, 15) for month in range(1, 13)]
+        dates += [date(year, month, 28) for month in (3, 6, 9, 12)]
+    dates.sort()
+
+    assert len(dates) == 64
+    assert _payments_per_year(dates) == 16
+
+    # 频率对了，年度窗口才正好是一年 —— 16 笔 × 0.25 = 4.00，而不是 3.00
+    series = _trailing_annual_series([(d, 0.25) for d in dates], per_year=16)
+    assert series[-1][1] == pytest.approx(4.00)
+
+
+def test_payments_per_year_ignores_partial_years():
+    """首年从数据起点开始、末年还没过完，两者都是半截，数进去只会数少。"""
+    dates = (
+        [date(2022, 11, 15), date(2022, 12, 15)]  # 2022 只有 2 笔
+        + [d for y in (2023, 2024) for d, _ in _year_of_payments(y)]
+        + [date(2025, 1, 15), date(2025, 2, 15), date(2025, 3, 15)]  # 2025 只有 3 笔
+    )
+    assert _payments_per_year(dates) == 12
+
+
+def test_payments_per_year_ignores_a_one_off_special_dividend():
+    """偶有一次特别派息只影响当年，不该改变频率判断。"""
     dates = [date(2016, 1, 4) + timedelta(days=91 * i) for i in range(10)]
     dates.insert(4, dates[3] + timedelta(days=3))  # 一次插进来的额外派息
     dates.sort()
     assert _payments_per_year(dates) == 4
+
+
+def test_payments_per_year_ties_break_toward_the_smaller():
+    """众数打平时取小的：多出来的那一笔更可能是特别派息。
+
+    VFLO 的 2024 年有 13 笔、2025 年 12 笔 —— 真值是 12 笔/年，
+    多出来的是年底额外的一次。
+    """
+    dates = (
+        [d for d, _ in _year_of_payments(2023)]
+        + [d for d, _ in _year_of_payments(2024, count=13)]
+        + [d for d, _ in _year_of_payments(2025)]
+        + [date(2026, 1, 15), date(2026, 2, 15)]  # 末年半截，不参与计数
+    )
+    dates.sort()
+    assert _payments_per_year(dates) == 12
 
 
 def test_trailing_annual_series_sums_complete_windows():
@@ -379,21 +456,52 @@ def test_dividend_growth_recovers_exact_geometric_rate(growth: float):
         (base + timedelta(days=91 * i), 0.25 * (1.0 + growth) ** (91 * i / 365.25))
         for i in range(24)
     ]
-    assert _annualised_dividend_growth(dividends, max_years=15) == pytest.approx(
-        growth, abs=1e-9
-    )
+    result = _annualised_dividend_growth(dividends, max_years=15)
+    assert result is not None
+    rate, years = result
+    assert rate == pytest.approx(growth, abs=1e-9)
+    # 跨度一并返回：调用方要拿它判断这个增长率可不可信
+    assert years == pytest.approx(4.98, abs=0.05)
 
 
 def test_dividend_growth_flat_payments_is_zero():
-    dividends = _quarterly(date(2016, 1, 15), 24, 0.25)
-    assert _annualised_dividend_growth(dividends, max_years=15) == pytest.approx(0.0)
+    """派息一直没变 —— 这是**测出来**的 0，和「测不了」不是一回事。"""
+    result = _annualised_dividend_growth(_quarterly(date(2016, 1, 15), 24, 0.25), 15)
+    assert result is not None
+    rate, years = result
+    assert rate == pytest.approx(0.0)
+    assert years > 1.0
 
 
-def test_dividend_growth_gives_up_when_history_too_short():
-    """凑不出两个完整年度就返回 0，不拿半截窗口硬算。"""
-    dividends = _quarterly(date(2025, 1, 15), 3, 0.25)
-    assert _annualised_dividend_growth(dividends, max_years=15) == 0.0
-    assert _annualised_dividend_growth([], max_years=15) == 0.0
+def test_dividend_growth_returns_none_when_no_comparable_window():
+    """凑不出两个完整年度就返回 None，不拿半截窗口硬算。
+
+    **必须和 0.0 分开**：0.0 的意思是「测过了，就是不涨」，
+    None 的意思是「测不了」。早先两者共用一个 0.0，
+    界面于是把「不知道」显示成「不增长」。
+    """
+    assert _annualised_dividend_growth(_quarterly(date(2025, 1, 15), 3, 0.25), 15) is None
+    assert _annualised_dividend_growth([], 15) is None
+
+
+def test_dividend_growth_span_is_the_measurement_window_not_the_history():
+    """返回的跨度是**量增长用的区间**，比派息记录的总长要短。
+
+    这是 VFLO 那类新基金的关键：3 年派息记录听着够，但每年 12 笔，
+    要凑两个完整年度去对比，最早那个窗口只能落在 2 年多以前 ——
+    真正量出增长率的区间自始至终只有那么长。
+    """
+    dividends = _years_of_payments(2023, 2026)  # 4 个自然年 × 12 笔
+    result = _annualised_dividend_growth(dividends, max_years=15)
+    assert result is not None
+    _, years = result
+
+    history = (dividends[-1][0] - dividends[0][0]).days / 365.25
+    assert history == pytest.approx(3.90, abs=0.05)
+    assert years == pytest.approx(3.00, abs=0.05)
+    # 月度派息要攒够 12 笔才开得了一个窗口，所以量增长的区间比派息记录
+    # 整整短一年。VFLO 就是这个差：记录 3.17 年，量增长的只有 2.24 年。
+    assert history - years == pytest.approx(0.90, abs=0.05)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1315,6 +1423,118 @@ def test_history_years_matches_the_window_when_history_is_long_enough():
     prices = _geometric_prices(date(2006, 9, 25), 20, 0.08)
     params = derive_params(prices, [], 10)
     assert params.history_years == pytest.approx(10.0, abs=0.05)
+
+
+# ══ 已宣告但还没派发的股息不能进 TTM ═══════════════════════════════
+
+
+def test_derive_params_drops_dividends_dated_after_the_last_price_bar():
+    """回归测试：数据源连**将来**的派息一起返回。
+
+    实测 MAIN 的响应里有三笔（抓取当天 2026-09-25，回来的是 10-08 / 11-06 /
+    12-08）。收进来的话，TTM 就把还没到账的钱算成了已到账 —— 股息率虚高，
+    用来对比的跨度也被拉长。
+    """
+    prices = _prices_ending_on(date(2026, 9, 25), years=5, growth=0.05)
+    paid = _quarterly(date(2025, 12, 24), 4, 0.25)  # 最近一年，已派发
+    declared = [
+        (date(2026, 10, 8), 10.0),  # 已宣告、还没派 —— 一笔巨额特别分红
+        (date(2026, 11, 6), 10.0),
+        (date(2026, 12, 8), 10.0),
+    ]
+
+    params = derive_params(prices, paid + declared, 10)
+
+    # 只认已派发的 4 笔：1.00 / 100 附近的收盘价 ≈ 1%
+    assert params.dividend_yield == pytest.approx(
+        sum(a for _, a in paid) / prices[-1][1]
+    )
+    assert params.dividend_yield < 0.02  # 未过滤时会是 30% 上下
+
+
+def test_derive_params_bounds_dividends_by_the_bar_not_by_today():
+    """边界取最后一根 K 线，不取 `date.today()`。
+
+    两个理由，这个测试卡的是第二个：
+      1. 同一份缓存隔几天读，结果必须一样 —— 用今天过滤就会变；
+      2. 抓取路径和读缓存路径都走 `derive_params`，边界收在这里两条都干净。
+    所以「晚于最后一根 K 线」的派息一律不算，哪怕它早于今天。
+    """
+    prices = _prices_ending_on(date(2026, 9, 25), years=5, growth=0.05)
+    paid = _quarterly(date(2025, 12, 24), 4, 0.25)
+    after_the_bar = [(date(2026, 9, 26), 50.0)]  # 晚一天：早于今天，但晚于 K 线
+
+    params = derive_params(prices, paid + after_the_bar, 10)
+
+    assert params.dividend_yield == pytest.approx(
+        sum(a for _, a in paid) / prices[-1][1]
+    )
+
+
+# ══ 测量区间不够长就不给股息增长率 ═════════════════════════════════
+
+
+def test_derive_params_refuses_dividend_growth_from_a_short_window():
+    """回归测试（VFLO）：派息记录够 3 年，**量增长的区间**不够。
+
+    这组数据刻意造成 VFLO 的形状 —— 首末年都是半截，中间三年是完整的
+    月度派息：
+
+        派息记录  3.75 年   ← 看着够长
+        测量区间  2.75 年   ← 真正拿去算增长的只有这么点
+
+    差在哪儿：月度派息要攒够 12 笔才开得了一个窗口，最早那个窗口只能落在
+    一年前。VFLO 那段区间正好是它的建仓爬坡期（首笔 $0.00285），拿爬坡
+    起点去比现在，年化出 26.6% —— 那不是「股息涨得快」，是把爬坡外推 30 年。
+
+    **门槛必须挂在测量区间上，不能挂在记录长度上** —— 挂错了这个用例就
+    拦不住（记录 3.75 > 3，一路放行）。
+    """
+    prices = _geometric_prices(date(2022, 7, 15), 3.75, 0.2)
+    dividends = (
+        _year_of_payments(2022, count=12, amount=0.01)[6:]  # 2022 下半年 6 笔
+        + _year_of_payments(2023, count=12, amount=0.02)
+        + _year_of_payments(2024, count=12, amount=0.04)
+        + _year_of_payments(2025, count=12, amount=0.08)
+        + _year_of_payments(2026, count=12, amount=0.16)[:4]  # 2026 上半年 4 笔
+    )
+    history = (dividends[-1][0] - dividends[0][0]).days / 365.25
+    assert history == pytest.approx(3.75, abs=0.05)  # 记录够长
+
+    params = derive_params(prices, dividends, 10)
+
+    assert params.dividend_growth_span_years == pytest.approx(2.75, abs=0.05)
+    assert params.dividend_growth == 0.0  # 没有拿那 2.75 年去外推
+    assert params.dividend_growth_insufficient_history is True
+
+
+def test_derive_params_reports_dividend_growth_when_the_window_is_long_enough():
+    """窗口够长就照常报 —— 门槛不能误伤有真实历史的标的。"""
+    prices = _geometric_prices(date(2016, 1, 4), 10, 0.08)
+    dividends = _years_of_payments(2018, 2025, count=12, base=0.25, growth=0.05)
+
+    params = derive_params(prices, dividends, 10)
+
+    assert params.dividend_growth_insufficient_history is False
+    assert params.dividend_growth == pytest.approx(0.05, abs=1e-3)
+    assert params.dividend_growth_span_years is not None
+    assert params.dividend_growth_span_years >= 3.0
+
+
+def test_derive_params_does_not_flag_a_non_payer():
+    """不派息的标的**不该**被标记为「历史不足」。
+
+    「不派息」和「派息史太短」是两件事：前者是标的的性质，不是缺陷，
+    界面弹一句「历史不足，请留意」只会让人以为数据出了问题。
+    """
+    prices = _geometric_prices(date(2016, 1, 4), 10, 0.08)
+
+    params = derive_params(prices, [], 10)
+
+    assert params.dividend_yield == 0.0
+    assert params.dividend_growth == 0.0
+    assert params.dividend_growth_insufficient_history is False
+    assert params.dividend_growth_span_years is None
 
 
 def test_cached_symbol_as_name_is_upgraded_from_the_list(tmp_path: Path, universe):
