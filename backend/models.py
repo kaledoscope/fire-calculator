@@ -207,6 +207,16 @@ class Segment(BaseModel):
     """
 
     months: int = Field(..., gt=0, description="本阶段持续月数")
+    frequency_months: int = Field(
+        1,
+        ge=1,
+        description=(
+            "定投频率：**每几个月投一次**，默认 1（每月）。"
+            "金额是「每期一笔整的」，不是摊薄到各月 —— 填 3 就是每三个月"
+            "买一笔，现金流是断续的，与真实的分批买入一致。"
+            "首月必投，之后每隔 `frequency_months` 个月一笔。"
+        ),
+    )
     monthly: dict[str, float] = Field(default_factory=dict, description="逐标的月投额")
     total: float | None = Field(None, ge=0.0, description="月投总额，按占比拆解")
 

@@ -60,7 +60,7 @@ export function defaultConfig() {
     cash: { annual_rate: 0.02 },
     tax: { dividend_tax: 0.1, capital_gains_tax: 0 },
     plan: {
-      segments: [{ months: 120, monthly: { SCHD: 1200, NVDA: 800 } }],
+      segments: [{ months: 120, frequency_months: 1, monthly: { SCHD: 1200, NVDA: 800 } }],
     },
     fire: {
       tiers: [

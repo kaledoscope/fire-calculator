@@ -302,6 +302,76 @@ def test_segments_expand_into_timeline_with_gaps():
     assert len(schedule) == 30
 
 
+def test_frequency_puts_the_whole_amount_on_one_month():
+    """定投频率：每 N 个月投一笔**整的**，不摊到中间月份上。
+
+    这是「按季买入」和「每月把季度的钱摊平」的区别 —— 后者是连续注资，
+    和真实的按季下单不是一回事。所以不投的月份必须是**空的**。
+    """
+    config = Config(
+        assets=[make_asset("SCHD", weight=1.0)],
+        plan=Plan(segments=[Segment(months=7, frequency_months=3, monthly={"SCHD": 900.0})]),
+    )
+    schedule = expand_schedule(config, 7)
+
+    # 第 1、4、7 月各投一笔 900 —— 不是每月 300
+    assert [i for i, m in enumerate(schedule) if m] == [0, 3, 6]
+    assert all(schedule[i]["SCHD"] == 900.0 for i in (0, 3, 6))
+    assert sum(m.get("SCHD", 0.0) for m in schedule) == 2700.0
+
+
+def test_frequency_defaults_to_monthly():
+    """不填频率 = 每月投一次，与加这个字段之前完全一致。"""
+    config = Config(
+        assets=[make_asset("SCHD", weight=1.0)],
+        plan=Plan(segments=[Segment(months=4, monthly={"SCHD": 100.0})]),
+    )
+    schedule = expand_schedule(config, 4)
+    assert all(m["SCHD"] == 100.0 for m in schedule)
+
+
+def test_frequency_larger_than_the_segment_invests_once():
+    """频率比阶段还长 —— 只在首月投一笔，然后阶段就结束了。
+
+    这不是错误配置，只是稀疏：不该为了让数字好看而把它拒掉，
+    也不该偷偷再投一笔。
+    """
+    config = Config(
+        assets=[make_asset("SCHD", weight=1.0)],
+        plan=Plan(segments=[Segment(months=6, frequency_months=12, monthly={"SCHD": 500.0})]),
+    )
+    schedule = expand_schedule(config, 6)
+    assert [i for i, m in enumerate(schedule) if m] == [0]
+
+
+def test_frequency_is_per_segment():
+    """频率是**每段自己的**属性：同一份计划里可以前一段月投、后一段季投。"""
+    config = Config(
+        assets=[make_asset("SCHD", weight=1.0)],
+        plan=Plan(
+            segments=[
+                Segment(months=3, monthly={"SCHD": 100.0}),
+                Segment(months=6, frequency_months=2, monthly={"SCHD": 400.0}),
+            ]
+        ),
+    )
+    schedule = expand_schedule(config, 9)
+
+    assert [m.get("SCHD", 0.0) for m in schedule] == [100, 100, 100, 400, 0, 400, 0, 400, 0]
+
+
+def test_frequency_survives_horizon_truncation():
+    """频率与截断叠加：超出计算年限的那几笔一笔都不投，也不改变前面几笔的节奏。"""
+    config = Config(
+        assets=[make_asset("SCHD", weight=1.0)],
+        plan=Plan(segments=[Segment(months=60, frequency_months=6, monthly={"SCHD": 1200.0})]),
+    )
+    schedule = expand_schedule(config, 14)
+
+    assert len(schedule) == 14
+    assert [i for i, m in enumerate(schedule) if m] == [0, 6, 12]
+
+
 def test_empty_plan_means_no_contribution():
     """计划为空数组时，全程月投 0 —— 纯存量增长。"""
     config = Config(assets=[make_asset()], plan=Plan(segments=[]))

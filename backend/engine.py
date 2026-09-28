@@ -63,6 +63,10 @@ def expand_schedule(config: Config, horizon_months: int) -> list[dict[str, float
 
     阶段首尾相接依次排开。阶段之间的空隙视作月投 0（SRS FR-004 异常分支）。
     重叠由前端拦截（A19），此处不做检测 —— 若真出现重叠，金额相加。
+
+    每段还可以有自己的**定投频率**（`frequency_months`，默认 1 = 每月）。
+    频率只决定「哪几个月投」，不改变单笔金额；**不投的月份是空的**，
+    不会把一笔摊薄到中间月份上。
     """
     schedule: list[dict[str, float]] = [{} for _ in range(horizon_months)]
     weights = {a.symbol: a.target_weight for a in config.assets}
@@ -82,6 +86,11 @@ def expand_schedule(config: Config, horizon_months: int) -> list[dict[str, float
             idx = cursor + offset
             if idx >= horizon_months:
                 break
+            # 定投频率（FR-004）：每 `frequency_months` 个月投一笔，首月必投。
+            # 是「一笔整的」，**不是把一笔摊到中间的月份上** —— 摊薄会把
+            # 断续的现金流抹平成连续注资，和真实的按季/按半年买入不是一回事。
+            if offset % seg.frequency_months:
+                continue
             for symbol, amount in amounts.items():
                 if amount:
                     schedule[idx][symbol] = schedule[idx].get(symbol, 0.0) + amount

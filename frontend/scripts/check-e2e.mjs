@@ -774,6 +774,295 @@ const longSpan = await quoteNoteFor('SCHX', {
 })
 ok('区间够长时不出现这句话', !/测不了/.test(longSpan), longSpan)
 
+// ══ ⑭ 定投计划：持续时间按「年 + 个月」两个面额填 ══════════════════
+//
+// 年与月是**加数**，不是进位位 —— 唯一的真值仍是一个整数（总月数）。
+// 所以「7 年 25 个月」照收（= 9 年 1 个月），当场把实际值标出来。
+// 这块面板此前端到端零覆盖，顺手补齐。
+const durY = (i = 0) => page.locator(`#dy-${i}`)
+const durM = (i = 0) => page.locator(`#dm-${i}`)
+const carryText = async () => {
+  const note = page.locator('.segment .carry')
+  return (await note.count()) ? (await note.first().innerText()).replace(/\s+/g, ' ') : ''
+}
+const planAxis = async () => (await page.locator('.axis').innerText()).replace(/\s+/g, ' ')
+
+async function headGeometry(i = 0) {
+  return page.evaluate((i) => {
+    const seg = document.querySelectorAll('.segment')[i]
+    if (!seg) return null
+    const box = (el) => el.getBoundingClientRect()
+    const pair = box(seg.querySelector('.pair'))
+    const span = seg.querySelector('.span')
+    const btn = box(seg.querySelector('button.icon'))
+    const cr = box(seg.closest('.card'))
+    return {
+      pairRight: Math.round(pair.right),
+      spanLeft: Math.round(box(span).left),
+      spanWidth: Math.round(box(span).width),
+      closeOverflow: Math.round(btn.right - cr.right),
+    }
+  }, i)
+}
+
+const investedValue = async () => {
+  const raw = await invested()
+  const mult = raw.includes('K') ? 1e3 : raw.includes('M') ? 1e6 : 1
+  return parseFloat(raw.replace(/[$,]/g, '')) * mult
+}
+
+ok(
+  '定投计划默认只有一个阶段',
+  (await page.locator('.segment').count()) === 1,
+  `${await page.locator('.segment').count()} 个`,
+)
+
+// —— 只填年：7 年 ——
+await durY().fill('7')
+await durM().fill('0')
+await settle(300)
+ok('只填 7 年 → 定投覆盖 84 个月', (await planAxis()).includes('84'), await planAxis())
+ok('规范写法不出现标注', (await carryText()) === '', await carryText())
+
+// —— 只填月：144 个月。逐字打，**不能用 fill()** ——
+// fill 是一次性写入，正好绕过了「每敲一个数字就被规范化重写，
+// 三个数字根本打不完」这个真问题。要测的就是逐字输入。
+await durY().fill('0')
+await durM().fill('')
+await durM().pressSequentially('144', { delay: 40 })
+await settle(300)
+ok('月份框里逐字打「144」不会被打断', (await durM().inputValue()) === '144', await durM().inputValue())
+const note144 = await carryText()
+ok('144 个月当场标出实际为 12 年', /12 年/.test(note144) && /144 个月/.test(note144), note144)
+
+// —— 组合：7 年 + 25 个月 ——
+await durY().fill('7')
+await durM().fill('')
+await durM().pressSequentially('25', { delay: 40 })
+await settle(300)
+const note109 = await carryText()
+ok(
+  '7 年 25 个月当场标出实际为 9 年 1 个月',
+  /9 年 1 个月/.test(note109) && /109 个月/.test(note109),
+  note109,
+)
+ok('未进位的写法照样算进时间轴', (await planAxis()).includes('109'), await planAxis())
+
+// —— 失焦归位：屏幕上的样子要和存盘的样子一致 ——
+// 不归位的话，界面显示 7/25 而存盘是 109，重新载入会变成 9/1，
+// 用户看到自己的数「自己变了」。
+await durM().blur()
+await settle(300)
+const backY = await durY().inputValue()
+const backM = await durM().inputValue()
+ok('失焦后归位成 9 年 1 个月', backY === '9' && backM === '1', `实际 ${backY} 年 ${backM} 个月`)
+ok('归位后标注自动消失', (await carryText()) === '', await carryText())
+
+// —— 两个框都清零：给句人话，别让用户吃一句英文校验错 ——
+await durY().fill('0')
+await durM().fill('0')
+await settle(300)
+ok('持续时间为 0 时给出中文提示', /至少填 1 个月/.test(await carryText()), await carryText())
+
+// —— 持续时间真的喂给了引擎 ——
+// 「累计投入」只由「投了几期 × 每期多少」决定，与涨跌无关，所以期数翻倍
+// 就该正好翻倍。这条同时证明了新控件没把 months 传丢、传错或传成 0。
+async function investedAt(years, months) {
+  await durY().fill(String(years))
+  await durM().fill(String(months))
+  await durM().blur()
+  await compute()
+  return investedValue()
+}
+
+const inv5 = await investedAt(5, 0)
+const inv10 = await investedAt(10, 0)
+const ratio = inv10 / inv5
+ok(
+  '期限翻倍，累计投入正好翻倍（证明持续时间喂到了引擎）',
+  Math.abs(ratio - 2) < 0.02,
+  `${inv5} → ${inv10}，比值 ${ratio.toFixed(3)}`,
+)
+
+// —— 像素：两个面额框不能把右边那行月份区间挤没 ——
+for (const vp of [1440, 900]) {
+  await page.setViewportSize({ width: vp, height: 1000 })
+  await page.waitForTimeout(250)
+  const g = await headGeometry()
+  ok(
+    `${vp}px：两个面额框没压住右边的月份区间`,
+    g !== null && g.pairRight <= g.spanLeft && g.spanWidth > 0,
+    JSON.stringify(g),
+  )
+  ok(`${vp}px：删除按钮没被顶出卡片`, g !== null && g.closeOverflow <= 0, g && `${g.closeOverflow}px`)
+}
+await page.setViewportSize({ width: 1440, height: 1000 })
+
+// ══ ⑮ 定投计划：定投频率（默认每月） ══════════════════════════════
+//
+// 频率是「每 N 个月投一笔**整的**」，不是把一笔摊到中间月份上 ——
+// 摊薄会把按季买入抹成连续注资，和事实不符。上面那条「期限翻倍 →
+// 累计投入翻倍」的用例已经在 N=1 下守着引擎，这里守 N>1 的现金流形状。
+const freqBox = (i = 0) => page.locator(`#sf-${i}`)
+// 措辞断言不认符号名 —— 跑到这里时标的已经被前面几节改名过了
+const firstAmountLabel = async () =>
+  (await page.locator('.segment .amounts label').first().innerText()).trim()
+const totalLine = async () => (await page.locator('.segment .total').first().innerText()).replace(/\s+/g, ' ')
+const amountBoxes = page.locator('.segment .amounts input')
+
+ok('定投频率默认每月', (await freqBox().inputValue()) === '1', await freqBox().inputValue())
+ok('N=1 时措辞说「每月投入」', /每月投入额/.test(await firstAmountLabel()), await firstAmountLabel())
+
+// 把所有金额框清零，只留第一格 300 —— 让下面的算术不依赖默认值，
+// 也不依赖当前有哪几只标的（前面几节改过名字）
+for (let k = 0; k < (await amountBoxes.count()); k++) {
+  await amountBoxes.nth(k).fill('0')
+  await amountBoxes.nth(k).blur()
+}
+await amountBoxes.first().fill('300')
+await amountBoxes.first().blur()
+await settle(200)
+
+// —— 改成每 3 个月一次 ——
+await freqBox().fill('3')
+await freqBox().blur()
+await settle(300)
+// 注意别用 /月投/ 去否：**「每 3 个月投入额」本身就含「月投」两个字**
+ok('改频率后措辞跟着变，说的是「每 3 个月」', /每 3 个月投入额/.test(await firstAmountLabel()), await firstAmountLabel())
+ok('合计那行也说清是「每 3 个月」', /每 3 个月投入合计/.test(await totalLine()), await totalLine())
+
+// 单笔金额不因频率而变 —— 变的是**多久投一次**，不是每笔投多少
+ok('单笔金额不随频率缩放', (await amountBoxes.first().inputValue()) === '300', await amountBoxes.first().inputValue())
+
+// —— 真正的验收：引擎收到的是断续的一笔整的 ——
+// 每 3 个月一笔 300、投 5 年 0 个月 → 第 1/4/…/58 月共 20 笔 × 300 = 6,000。
+// 若被摊薄成按月注资，这里会是 18,000 —— 那正是这条要挡住的错法。
+await durY().fill('5')
+await durM().fill('0')
+await durM().blur()
+await compute()
+const invQuarterly = await investedValue()
+ok(
+  '每 3 个月投 300、投 5 年 → 累计投入 6,000（摊薄的话会是 18,000）',
+  Math.abs(invQuarterly - 6000) < 1,
+  `${invQuarterly}`,
+)
+
+// 同金额改回每月 → 60 笔 × 300 = 18,000，正好是 3 倍
+await freqBox().fill('1')
+await freqBox().blur()
+await compute()
+const invMonthly = await investedValue()
+ok(
+  '频率改回每月 → 累计投入正好 3 倍',
+  Math.abs(invMonthly / invQuarterly - 3) < 0.01,
+  `${invQuarterly} → ${invMonthly}`,
+)
+
+// —— 清空频率框重打，不该变成「13」——
+await freqBox().fill('')
+await freqBox().pressSequentially('12', { delay: 40 })
+await settle(200)
+ok('频率框逐字打「12」不会被打断', (await freqBox().inputValue()) === '12', await freqBox().inputValue())
+await freqBox().blur()
+await settle(200)
+
+// —— 像素：频率框和「填法」并排，不能互压、不能顶出卡片 ——
+async function controlsGeometry(i = 0) {
+  return page.evaluate((i) => {
+    const seg = document.querySelectorAll('.segment')[i]
+    if (!seg) return null
+    const box = (el) => el.getBoundingClientRect()
+    const mode = box(seg.querySelector('.mode'))
+    const freq = box(seg.querySelector('.freq'))
+    const cr = box(seg.closest('.card'))
+
+    // 标签有没有被挤到换行：拿同一段文字、同样样式、但强制不换行量一次
+    // 做基准，比实际高度高就说明折了行。措辞从「月投额」变成「每 3 个月
+    // 投入额」之后变长了，窄屏上是有可能折的 —— 折了不报错，只是难看。
+    const lbl = seg.querySelector('.amounts label')
+    const probe = lbl.cloneNode(true)
+    probe.style.position = 'absolute'
+    probe.style.whiteSpace = 'nowrap'
+    probe.style.width = 'auto'
+    document.body.appendChild(probe)
+    const oneLine = probe.getBoundingClientRect().height
+    probe.remove()
+
+    return {
+      modeRight: Math.round(mode.right),
+      freqLeft: Math.round(freq.left),
+      // 「同一行」不能比 top：`.controls` 是 align-items: flex-end，频率框
+      // 头上多一行 label，两者顶边本来就差一截。要比的是垂直区间相不相交。
+      sameLine: mode.bottom > freq.top && freq.bottom > mode.top,
+      freqRight: Math.round(freq.right),
+      cardRight: Math.round(cr.right),
+      freqBottom: Math.round(freq.bottom),
+      cardBottom: Math.round(cr.bottom),
+      labelWrapped: lbl.getBoundingClientRect().height > oneLine + 2,
+    }
+  }, i)
+}
+
+for (const vp of [1440, 900]) {
+  await page.setViewportSize({ width: vp, height: 1000 })
+  await page.waitForTimeout(250)
+  const c = await controlsGeometry()
+  ok(
+    `${vp}px：频率框没压住「填法」切换`,
+    c !== null && (!c.sameLine || c.modeRight <= c.freqLeft),
+    JSON.stringify(c),
+  )
+  ok(
+    `${vp}px：频率框在卡片内，没顶出右边也没顶出底部`,
+    c !== null && c.freqRight <= c.cardRight && c.freqBottom <= c.cardBottom,
+    c && `右溢出 ${c.freqRight - c.cardRight}px 下溢出 ${c.freqBottom - c.cardBottom}px`,
+  )
+  ok(`${vp}px：金额框的标签没被挤到折行`, c !== null && !c.labelWrapped, JSON.stringify(c))
+}
+await page.setViewportSize({ width: 1440, height: 1000 })
+
+// ══ ⑯ 输入区不留「填什么都一样」的废话 ════════════════════════════
+//
+// 这里曾经无条件写着「第 N 个月起不再定投 —— 之后只靠复利增长。这正是
+// Coast FIRE 的形状。」—— 只要定投没覆盖满计算年限就出现，等于填什么都
+// 显示同一句。真正的 Coast 结论在 FIRE 模块里按数算（FR-013），
+// 这里复读一遍不带任何信息，只会占地方。
+// 锚点必须是**整张卡片**。一开始写的是 `.segment` 的父节点，那是 `.segments`
+// 容器 —— 而时间轴那一段是它的**兄弟**，根本不在里面，于是这两条断言
+// 一直在看一个永远不含这句话的元素，恒绿。改成按「含持续时间输入框的卡片」
+// 定位，才真的把它框进来。
+const planCard = page.locator('.card').filter({ has: page.locator('#dy-0') })
+const planCardText = (await planCard.innerText()).replace(/\s+/g, ' ')
+ok('不再出现无条件的 Coast 复读', !/Coast FIRE 的形状/.test(planCardText), planCardText.slice(0, 60))
+ok('也不再出现「之后只靠复利增长」', !/不再定投/.test(planCardText))
+
+// 删掉那段话之后，盒子要跟着缩 —— 这里量的是**有没有留下空档**。
+// 判据不能是「小于某个数」：那证明不了什么。要的是轴的最后一行到卡片
+// 内边界的距离，**恰好等于卡片自身的下内边距** —— 多出来的那几像素就是
+// 删剩的空壳。两处都要量：外壳自己有没有下内边距，以及总账对不对得上。
+async function timelineWrapGeometry() {
+  return page.evaluate(() => {
+    const wrap = document.querySelector('.timeline-wrap')
+    if (!wrap) return null
+    const card = wrap.closest('.card')
+    const axis = wrap.querySelector('.axis')
+    return {
+      wrapPadBottom: Math.round(parseFloat(getComputedStyle(wrap).paddingBottom)),
+      cardPadBottom: Math.round(parseFloat(getComputedStyle(card).paddingBottom)),
+      tailGap: Math.round(card.getBoundingClientRect().bottom - axis.getBoundingClientRect().bottom),
+    }
+  })
+}
+
+const tw = await timelineWrapGeometry()
+ok('时间轴外壳自己没有残留的下内边距', tw !== null && tw.wrapPadBottom === 0, tw && `padding-bottom ${tw.wrapPadBottom}px`)
+ok(
+  '轴下面只剩卡片自身的内边距，没有删剩的空档',
+  tw !== null && tw.tailGap === tw.cardPadBottom,
+  tw && `轴后 ${tw.tailGap}px，卡片内边距 ${tw.cardPadBottom}px`,
+)
+
 // ══ 收尾 ═════════════════════════════════════════════════════════
 ok('全程无控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '))
 
