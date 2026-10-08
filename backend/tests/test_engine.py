@@ -25,12 +25,13 @@ from backend.models import (
     AssetParams,
     Config,
     DividendMode,
-    Milestone,
-    MilestoneKind,
+    FireMode,
+    GoalCriterion,
     ParamSource,
     Plan,
     Segment,
     Settings,
+    TaxSetting,
 )
 
 ENGINE_PATH = Path(__file__).resolve().parent.parent / "engine.py"
@@ -455,42 +456,197 @@ def test_cash_does_not_absorb_rebalancing_when_accumulating_cash():
 
 
 # ══════════════════════════════════════════════════════════════════
-# FR-012 / FR-014 · 里程碑与敏感度
+# FR-012 / FR-014 · 目标达成与敏感度
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_milestones_report_first_reach_or_none():
-    """FR-012：里程碑给出首次达成月份；达不到就如实标未达成，不留空。"""
+def test_withdrawal_goals_report_first_reach_or_none():
+    """FR-012：目标给出首次达成月份；达不到就如实标未达成，不留空。"""
     from backend.models import FireGoals, FireTier
 
     # 起始 $100,000（1000 股 × $100），30 年 @7% → $761,225
     config = Config(
         assets=[make_asset(price_growth=0.07, shares=1000.0)],
         fire=FireGoals(
-            tiers=[FireTier(name="Lean", annual_expense=20_000, multiple=25.0)],
-            milestones=[
-                Milestone(label="一万", amount=20_000.0),
-                Milestone(label="一亿", amount=100_000_000.0),
-                Milestone(
-                    label="Lean FIRE",
-                    kind=MilestoneKind.FIRE_TIER,
-                    tier_name="Lean",
-                ),
+            mode=FireMode.WITHDRAWAL,
+            tiers=[
+                FireTier(name="Lean", annual_expense=20_000, multiple=25.0),
+                FireTier(name="Fat", annual_expense=4_000_000, multiple=25.0),
             ],
         ),
         settings=Settings(horizon_months=360, rebalance_annually=False),
     )
     result = simulate(config)
-    hits = {h.label: h for h in result.milestones}
+    hits = {h.label: h for h in result.fire.goals}
 
-    assert hits["一万"].reached is True
-    assert hits["一万"].month is not None
-    # $500,000（Lean FIRE）在 30 年内也应达成
-    assert hits["Lean FIRE"].amount == pytest.approx(500_000.0)
+    # $500,000（Lean FIRE）在 30 年内应达成
+    assert hits["Lean FIRE"].target == pytest.approx(500_000.0)
     assert hits["Lean FIRE"].reached is True
+    assert hits["Lean FIRE"].month is not None
+    assert hits["Lean FIRE"].criterion is GoalCriterion.VALUE
     # $1 亿绝无可能
-    assert hits["一亿"].reached is False
-    assert hits["一亿"].month is None
+    assert hits["Fat FIRE"].reached is False
+    assert hits["Fat FIRE"].month is None
+    # 未达成也要说清差多少，而不是含糊的 0
+    assert 0.0 < hits["Fat FIRE"].progress < 1.0
+
+
+def test_income_goal_uses_after_tax_dividend():
+    """吃息判据必须用**税后**股息。
+
+    吃息退休花的是到手的钱。若误用税前的 `month_dividend`，达成时间会被
+    系统性提前 —— 这一个断言就是钉死这件事的。
+
+    ⚠️ 必须用 `DividendMode.CASH`（股息不再投资）来测。DRIP 下上调股息税
+    会**同时**压低再投资额、拖慢股数增长，于是「税前」那条路也跟着变慢，
+    两种写法给出同样的先后关系 —— 这个用例就变成了永不失灵的摆设。把股息
+    抽出来放现金，股数就与税率无关，此时两税率的毛股息完全相同、净股息
+    差 10%，用错字段会直接给出**同一个月份**。
+
+    另外股息必须**逐年增长**，门槛要卡在净、毛两条线之间 —— 若股息恒定，
+    要么第 1 个月就达标、要么永远不达标，两种写法都看不出区别。
+    这里 100 股 × $5/股 = $500/年，按 5% 涨；门槛 $960/年落在
+    毛线（≈13 年）与净线（≈16 年）之间。
+    """
+    from backend.models import FireGoals, IncomeGoal
+
+    def hit_month(tax: float) -> int | None:
+        config = Config(
+            assets=[make_asset(dividend_yield=0.05, dividend_growth=0.05, price_growth=0.0)],
+            tax=TaxSetting(dividend_tax=tax),
+            fire=FireGoals(
+                mode=FireMode.INCOME,
+                income_goals=[IncomeGoal(monthly_expense=80.0, inflation_adjusted=False)],
+            ),
+            settings=Settings(
+                horizon_months=600,
+                rebalance_annually=False,
+                dividend_mode=DividendMode.CASH,
+            ),
+        )
+        return simulate(config).fire.goals[0].month
+
+    untaxed = hit_month(0.0)
+    taxed = hit_month(0.10)
+
+    assert untaxed is not None and taxed is not None
+    # 股数恒定 ⇒ 毛股息与税率无关；只有净股息会因这 10% 推迟达标。
+    # 若这里相等，说明判据读的是税前那条序列。
+    assert taxed > untaxed, (
+        f"税前 {untaxed} / 税后 {taxed} —— 缴税没有推迟达标，"
+        "判据很可能用了 month_dividend（税前）而不是 month_dividend_net"
+    )
+
+
+def test_income_goal_inflation_adjustment_delays_target():
+    """按通胀折算只会让门槛更高、达标更晚（或同样早）。"""
+    from backend.models import FireGoals, IncomeGoal
+
+    def hit_month(adjusted: bool) -> int | None:
+        config = Config(
+            assets=[make_asset(dividend_yield=0.03, dividend_growth=0.05, price_growth=0.05)],
+            fire=FireGoals(
+                mode=FireMode.INCOME,
+                income_goals=[
+                    IncomeGoal(monthly_expense=500.0, inflation_adjusted=adjusted)
+                ],
+            ),
+            settings=Settings(
+                horizon_months=600, rebalance_annually=False, inflation_rate=0.05
+            ),
+        )
+        return simulate(config).fire.goals[0].month
+
+    flat = hit_month(False)
+    inflated = hit_month(True)
+
+    assert flat is not None
+    # 通胀 5% 时门槛逐年抬高，达标不可能更早
+    assert inflated is None or inflated > flat, f"折算前 {flat} / 折算后 {inflated}"
+
+
+def test_income_target_reflects_inflation_at_achievement_month():
+    """达成当月给出的 `target` 必须是**那一年**的通胀后金额。
+
+    这正是用户要的：「以现在的 700 美金退休」→ 达标那年按当时的物价算。
+    """
+    from backend.models import FireGoals, IncomeGoal
+
+    config = Config(
+        assets=[make_asset(dividend_yield=0.05, dividend_growth=0.06, price_growth=0.05)],
+        fire=FireGoals(
+            mode=FireMode.INCOME,
+            income_goals=[IncomeGoal(monthly_expense=700.0, inflation_adjusted=True)],
+        ),
+        settings=Settings(horizon_months=600, rebalance_annually=False, inflation_rate=0.025),
+    )
+    goal = simulate(config).fire.goals[0]
+
+    assert goal.reached and goal.month is not None
+    years = (goal.month - 1) // 12
+    assert goal.target_today == pytest.approx(8_400.0)  # 700 × 12，今天的钱
+    assert goal.target == pytest.approx(8_400.0 * 1.025**years)
+    # 折算后的门槛必然不低于今天的金额
+    assert goal.target > goal.target_today
+
+
+def test_income_goals_are_independent_and_sorted_by_month():
+    """多个目标各自判定，且按达成先后排 —— 小的先到，大的后到。"""
+    from backend.models import FireGoals, IncomeGoal
+
+    config = Config(
+        assets=[make_asset(dividend_yield=0.04, dividend_growth=0.06, price_growth=0.05)],
+        fire=FireGoals(
+            mode=FireMode.INCOME,
+            income_goals=[
+                IncomeGoal(monthly_expense=1500.0, label="大"),
+                IncomeGoal(monthly_expense=700.0, label="小"),
+            ],
+        ),
+        settings=Settings(horizon_months=600, rebalance_annually=False),
+    )
+    goals = simulate(config).fire.goals
+
+    assert [g.label for g in goals] == ["小", "大"]
+    assert goals[0].month < goals[1].month
+    # target_today 保留今日购买力，用来在界面上并排显示「今天 → 当年」
+    assert goals[0].target_today == pytest.approx(8_400.0)
+    assert goals[1].target_today == pytest.approx(18_000.0)
+
+
+def test_default_mode_keeps_legacy_withdrawal_numbers():
+    """默认模式必须是提取退休 —— 新增模式不该静默改掉已有用户的数字。"""
+    from backend.models import FireGoals, FireTier
+
+    config = Config(
+        assets=[make_asset(price_growth=0.07, shares=1000.0)],
+        fire=FireGoals(tiers=[FireTier(name="Lean", annual_expense=20_000, multiple=25.0)]),
+        settings=Settings(horizon_months=360, rebalance_annually=False),
+    )
+    assert config.fire.mode is FireMode.WITHDRAWAL
+    goal = simulate(config).fire.goals[0]
+    assert goal.criterion is GoalCriterion.VALUE
+    assert goal.target == pytest.approx(500_000.0)
+    # 100,000 → 500,000 @7%：约 23.8 年，取整到月
+    assert goal.month == 286
+
+
+def test_blended_dividend_growth_weights_by_payout_not_weight():
+    """股息增长率按**派息贡献**加权，不是按市值占比。"""
+    from backend.engine import blended_dividend_growth
+
+    config = Config(
+        assets=[
+            make_asset(symbol="A", weight=0.9, dividend_yield=0.03, dividend_growth=0.06),
+            make_asset(symbol="B", weight=0.1, dividend_yield=0.001, dividend_growth=0.20),
+        ]
+    )
+    # (0.06×0.03 + 0.20×0.001) / (0.03 + 0.001) = 0.0020/0.031
+    assert blended_dividend_growth(config) == pytest.approx(0.0020 / 0.031)
+
+    # 全无股息 → 没有「股息增长率」可言，不能硬给 0%
+    barren = Config(assets=[make_asset(dividend_yield=0.0, dividend_growth=0.0)])
+    assert blended_dividend_growth(barren) is None
 
 
 def test_sensitivity_shows_lower_growth_delays_target():
@@ -508,7 +664,7 @@ def test_sensitivity_shows_lower_growth_delays_target():
     deltas = [r.delta for r in result.sensitivity]
     assert deltas == [0.0, -0.01, -0.02, -0.03]
 
-    baseline = next(h for h in result.milestones if h.label == "Regular FIRE")
+    baseline = next(g for g in result.fire.goals if g.label == "Regular FIRE")
 
     # 基准行必须与主结果**同源** —— 它直接复用主循环的结果，不该有偏差
     base_row = result.sensitivity[0]
@@ -688,78 +844,107 @@ def test_blended_growth_counts_dividends_after_tax():
 # ══════════════════════════════════════════════════════════════════
 
 
-def test_coast_number_discounts_fire_number_to_today():
-    """Coast = FIRE Number ÷ (1+g)^n —— 是「今天」的数，所以远小于 FIRE Number。"""
-    from backend.models import CoastGoal
-
-    coast = CoastGoal(
-        annual_expense=60_000,
-        multiple=25,
-        years_to_retirement=20,
-        growth_rate=0.07,
-    )
-    # 1.07^20 = 3.869684…，故 1,500,000 ÷ 3.869684 = 387,628.50
-    assert coast.coast_number() == pytest.approx(1_500_000 / 1.07**20)
-    assert coast.coast_number() == pytest.approx(387_628.50, abs=0.01)
-    assert coast.coast_number() < coast.annual_expense * coast.multiple
-
-
-def test_barista_number_counts_part_time_income():
-    """Barista = (年支出 − 兼职收入) × 倍数，且保底不为负。"""
-    from backend.models import BaristaGoal
-
-    goal = BaristaGoal(annual_expense=60_000, part_time_income=20_000, multiple=25)
-    assert goal.barista_number() == pytest.approx(1_000_000)
-
-    # 兼职收入高过年支出 → 需求归零，而不是负数
-    rich = BaristaGoal(annual_expense=30_000, part_time_income=50_000, multiple=25)
-    assert rich.barista_number() == 0.0
-
-
-def test_fire_summary_reports_all_three_variants_on_one_timeline():
-    """三种口径都换算成「第几个月首次达到」—— 才有可比性。"""
-    from backend.models import BaristaGoal, CoastGoal, FireGoals, FireTier
+def test_fire_goals_smaller_target_is_reached_first():
+    """目标越小越先达成 —— 与具体参数无关的硬约束。"""
+    from backend.models import FireGoals, FireTier
 
     config = Config(
         assets=[make_asset(price_growth=0.07, shares=100.0, price=100.0)],
         plan=Plan(segments=[Segment(months=120, total=2_000.0)]),
         settings=Settings(horizon_months=360, rebalance_annually=False),
         fire=FireGoals(
-            tiers=[FireTier(name="Lean", annual_expense=30_000, multiple=25)],
-            coast=CoastGoal(
-                annual_expense=60_000,
-                multiple=25,
-                years_to_retirement=20,
-                growth_rate=0.07,
-            ),
-            barista=BaristaGoal(
-                annual_expense=60_000, part_time_income=20_000, multiple=25
-            ),
+            tiers=[
+                FireTier(name="Lean", annual_expense=30_000, multiple=25),
+                FireTier(name="Fat", annual_expense=120_000, multiple=25),
+            ],
         ),
     )
-    result = simulate(config)
+    goals = simulate(config).fire.goals
 
-    assert [t.label for t in result.fire.tiers] == ["Lean FIRE"]
-    assert result.fire.tiers[0].amount == pytest.approx(750_000)
-
-    assert result.fire.coast is not None
-    assert result.fire.coast.amount == pytest.approx(1_500_000 / 1.07**20)
-
-    assert result.fire.barista is not None
-    assert result.fire.barista.amount == pytest.approx(1_000_000)
-
-    # 目标越小越先达成 —— 这是三者相对关系的硬约束，与具体参数无关
-    by_amount = sorted(
-        [result.fire.tiers[0], result.fire.coast, result.fire.barista],
-        key=lambda r: r.amount,
-    )
-    reached_months = [r.month for r in by_amount if r.reached]
-    assert reached_months == sorted(reached_months)
+    assert goals[0].target == pytest.approx(750_000)
+    assert goals[1].target == pytest.approx(3_000_000)
+    reached = [g.month for g in goals if g.reached]
+    assert reached == sorted(reached)
 
 
 def test_fire_summary_is_empty_without_goals():
     """不填 FIRE 目标就不该凭空冒出一堆行 —— 整体可选（FR-006）。"""
     result = simulate(Config(assets=[make_asset()]))
-    assert result.fire.tiers == []
-    assert result.fire.coast is None
-    assert result.fire.barista is None
+    assert result.fire.goals == []
+    assert result.fire.dividend_growth is None
+
+
+def test_dividend_growth_only_reported_in_income_mode():
+    """股息增长率只在吃息模式下给 —— 提取模式不需要，给了反而像有含义。"""
+    from backend.models import FireGoals, FireTier, IncomeGoal
+
+    base = dict(
+        assets=[make_asset(dividend_yield=0.03, dividend_growth=0.06, price_growth=0.05)],
+        settings=Settings(horizon_months=120, rebalance_annually=False),
+    )
+    withdrawal = simulate(
+        Config(**base, fire=FireGoals(tiers=[FireTier(name="Lean", annual_expense=30_000)]))
+    )
+    income = simulate(
+        Config(
+            **base,
+            fire=FireGoals(
+                mode=FireMode.INCOME, income_goals=[IncomeGoal(monthly_expense=500.0)]
+            ),
+        )
+    )
+
+    assert withdrawal.fire.dividend_growth is None
+    assert income.fire.dividend_growth == pytest.approx(0.06)
+
+
+def test_real_dividend_growth_is_nominal_minus_inflation():
+    """退休后购买力的年变化 = 名义股息增长 − 通胀。
+
+    这是吃息退休的**口径台阶**，不是误差：达成月份是按「股息一直再投资」
+    的路径推出来的，而吃息退休恰恰意味着停止再投资 —— 股数从此恒定，
+    名义股息只按股息增长率走。界面据此说「实际购买力每年缩水 X%」，
+    所以这个数必须真的等于那个差，而不是随便一个看起来合理的值。
+    """
+    from backend.models import FireGoals, IncomeGoal
+
+    def real(growth: float, inflation: float) -> float | None:
+        return simulate(
+            Config(
+                assets=[make_asset(dividend_yield=0.04, dividend_growth=growth)],
+                fire=FireGoals(
+                    mode=FireMode.INCOME,
+                    income_goals=[IncomeGoal(monthly_expense=500.0)],
+                ),
+                settings=Settings(
+                    horizon_months=120,
+                    rebalance_annually=False,
+                    inflation_rate=inflation,
+                ),
+            )
+        ).fire.real_dividend_growth
+
+    # 跑得赢通胀 → 正数，界面说「购买力不缩水」
+    assert real(0.06, 0.025) == pytest.approx(0.035)
+    # 跑不赢 → 负数，界面改说「缩水」。符号错了整句话就说反了。
+    assert real(0.01, 0.03) == pytest.approx(-0.02)
+
+
+def test_real_dividend_growth_is_none_in_withdrawal_mode():
+    """提取模式不给这个数 —— 它花的是**本金**，没有「股息追不追得上通胀」这回事。
+
+    给了会像是「也考虑过了」，而实际上那是一句没有依据的话。
+    """
+    from backend.models import FireGoals, FireTier
+
+    result = simulate(
+        Config(
+            assets=[make_asset(dividend_yield=0.04, dividend_growth=0.06)],
+            fire=FireGoals(tiers=[FireTier(name="Lean", annual_expense=30_000)]),
+            settings=Settings(inflation_rate=0.025),
+        )
+    )
+    assert result.fire.real_dividend_growth is None
+    # 但通胀率本身照给 —— 这是配置事实，不是判断
+    assert result.fire.inflation_rate == pytest.approx(0.025)
+    assert result.fire.dividend_growth is None

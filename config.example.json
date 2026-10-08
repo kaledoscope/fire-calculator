@@ -50,6 +50,7 @@
     ]
   },
   "fire": {
+    "mode": "withdrawal",
     "tiers": [
       {
         "name": "Lean",
@@ -67,44 +68,18 @@
         "multiple": 25
       }
     ],
-    "milestones": [
+    "income_goals": [
       {
-        "label": "$10,000",
-        "kind": "fixed",
-        "amount": 10000
+        "label": "",
+        "monthly_expense": 700,
+        "inflation_adjusted": true
       },
       {
-        "label": "$100,000",
-        "kind": "fixed",
-        "amount": 100000
-      },
-      {
-        "label": "$250,000",
-        "kind": "fixed",
-        "amount": 250000
-      },
-      {
-        "label": "$500,000",
-        "kind": "fixed",
-        "amount": 500000
-      },
-      {
-        "label": "$1,000,000",
-        "kind": "fixed",
-        "amount": 1000000
+        "label": "",
+        "monthly_expense": 1500,
+        "inflation_adjusted": true
       }
-    ],
-    "coast": {
-      "annual_expense": 60000,
-      "multiple": 25,
-      "years_to_retirement": 20,
-      "growth_rate": 0.07
-    },
-    "barista": {
-      "annual_expense": 60000,
-      "part_time_income": 20000,
-      "multiple": 25
-    }
+    ]
   },
   "settings": {
     "horizon_months": 360,

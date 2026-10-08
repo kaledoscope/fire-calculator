@@ -2,7 +2,6 @@
   import Card from './Card.svelte'
   import FireOverview from './FireOverview.svelte'
   import GrowthChart from './GrowthChart.svelte'
-  import MilestoneList from './MilestoneList.svelte'
   import SensitivityTable from './SensitivityTable.svelte'
   import WithdrawalPanel from './WithdrawalPanel.svelte'
   import YearlyTable from './YearlyTable.svelte'
@@ -29,13 +28,11 @@
   const gain = $derived(last ? last.total_value - last.total_invested : 0)
   const gainRatio = $derived(last && last.total_value > 0 ? gain / last.total_value : 0)
 
-  /** 敏感度基准：第一个 FIRE 档位，否则最大的固定里程碑。 */
-  const baseMilestone = $derived.by(() => {
-    const hits = result?.milestones ?? []
-    if (!hits.length) return null
-    const tier = hits.find((h) => h.label.endsWith(' FIRE'))
-    return tier ?? hits[hits.length - 1]
-  })
+  /** FIRE 目标，按达成月份排序 —— 后端已经排好，这里不重排。 */
+  const fireGoals = $derived(result?.fire?.goals ?? [])
+
+  /** 敏感度基准：第一个（即最早达成的）目标。 */
+  const baseGoal = $derived(fireGoals[0] ?? null)
 
   const finalAssets = $derived(
     [...(last?.assets ?? [])].sort((a, b) => b.value - a.value),
@@ -143,16 +140,14 @@
 </Card>
 
 {#if last}
-  <GrowthChart {monthly} {currency} {rates} />
+  <GrowthChart {monthly} {currency} {rates} goals={fireGoals} />
 
   <FireOverview fire={result.fire} {monthly} {currency} {rates} />
 
-  <MilestoneList milestones={result.milestones} {currency} {rates} />
-
   <SensitivityTable
     sensitivity={result.sensitivity}
-    baseMonth={baseMilestone?.month ?? null}
-    baseLabel={baseMilestone?.label ?? '目标'}
+    baseMonth={baseGoal?.month ?? null}
+    baseLabel={baseGoal?.label ?? '目标'}
   />
 
   <YearlyTable {monthly} {currency} {rates} />

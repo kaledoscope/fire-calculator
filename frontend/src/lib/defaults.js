@@ -63,28 +63,19 @@ export function defaultConfig() {
       segments: [{ months: 120, frequency_months: 1, monthly: { SCHD: 1200, NVDA: 800 } }],
     },
     fire: {
+      // 默认「提取退休」：它是既有行为，换个默认值会让老配置的数字
+      // 无声无息地变一套（后端 FireGoals.mode 的默认值也是它，两处一致）。
+      mode: 'withdrawal',
       tiers: [
         { name: 'Lean', annual_expense: 30000, multiple: 25 },
         { name: 'Regular', annual_expense: 60000, multiple: 25 },
         { name: 'Fat', annual_expense: 120000, multiple: 25 },
       ],
-      // 社区常见节点（见 SRS FR-006 里程碑预设档位）。
-      // 标签不带货币符号 —— 金额是美元，显示时会按所选货币换算，
-      // 写死「$100,000」在日元视图下会变成「$100,000 ¥100,000」。
-      milestones: [
-        { label: '10K', kind: 'fixed', amount: 10000 },
-        { label: '100K', kind: 'fixed', amount: 100000 },
-        { label: '250K', kind: 'fixed', amount: 250000 },
-        { label: '500K', kind: 'fixed', amount: 500000 },
-        { label: '1M', kind: 'fixed', amount: 1000000 },
+      // 吃息退休的目标。留一个种子而不是空表 —— 切过去就能看到数，
+      // 否则用户切了模式只看到一片空白，以为坏了。
+      income_goals: [
+        { label: '', monthly_expense: 3000, inflation_adjusted: true },
       ],
-      coast: {
-        annual_expense: 60000,
-        multiple: 25,
-        years_to_retirement: 20,
-        growth_rate: 0.07,
-      },
-      barista: { annual_expense: 60000, part_time_income: 20000, multiple: 25 },
     },
     settings: {
       horizon_months: 360,

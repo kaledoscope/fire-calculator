@@ -14,7 +14,7 @@
    * 缩放的真正价值不只是「看得更大」：Y 轴会跟着**可见区间**重新定标，
    * 于是前 5 年那点早期积累也能铺满整个画布，而不是挤在左下角一条缝里。
    */
-  let { monthly = [], currency = 'USD', rates = null } = $props()
+  let { monthly = [], currency = 'USD', rates = null, goals = [] } = $props()
 
   const W = 720
   const H = 240
@@ -95,6 +95,52 @@
   }
 
   const yTicks = $derived([0, 0.25, 0.5, 0.75, 1].map((f) => f * chart.maxValue))
+
+  // ── 目标达成标记 ──────────────────────────────────────────────
+  //
+  // 主要标注是**竖线**，不是横线。原因是竖线天然不受 Y 轴缩放影响：
+  // 达成那个月曲线恰好穿过目标值，所以标记永远落在画布内。横线则不
+  // 然 —— 目标高于当前视野峰值时会跑到画布外，用户什么也看不见。
+
+  /**
+   * 带序号的完整目标表。序号与「FIRE 进度」的行一一对应，同时**充当 key**
+   * —— `label` 不保证唯一（同名档位、用户给两个目标起同一个名字），拿它做
+   * key 会撞上 Svelte 的 `each_key_duplicate`，整张图直接白掉。
+   */
+  const indexed = $derived(goals.map((g, i) => ({ ...g, index: i + 1 })))
+
+  /** 已达成、且落在当前视野内的目标。 */
+  const markers = $derived.by(() => {
+    if (!chart) return []
+    return indexed.filter(
+      (g) => g.month !== null && g.month >= chart.from && g.month <= chart.to,
+    )
+  })
+
+  /**
+   * 视野放不下的「提取」目标。它们画不出横线，但**绝不能就此消失** ——
+   * 一条被静默省略的标注，比一条画在边界上的标注更误导。
+   */
+  const overhead = $derived.by(() =>
+    indexed.filter((g) => g.criterion === 'value' && g.target > chart.maxValue),
+  )
+
+  /** 图上画得出的「提取」横线。 */
+  const valueLines = $derived.by(() =>
+    indexed.filter((g) => g.criterion === 'value' && g.target <= chart.maxValue),
+  )
+
+  /**
+   * 这个年限内**根本没达成**的目标。图上无点可标，但得说出来 ——
+   * 否则用户看到一条曲线、一张干净的图，会以为目标标记这个功能不存在，
+   * 而不是「你的目标还没到」。
+   */
+  const unreached = $derived(indexed.filter((g) => g.month === null))
+
+  /** chip 贴着图顶，左右各留半个宽度，免得被画布边缘切掉。 */
+  function chipX(month) {
+    return clamp(x(month), PAD.left + 12, W - PAD.right - 12)
+  }
 
   /** X 轴刻度：跨度够大就按年，缩到两年以内就改按月。 */
   const xTicks = $derived.by(() => {
@@ -346,6 +392,42 @@
             stroke-linecap="round"
           />
 
+          <!-- 「提取」目标的水平门槛线。只在目标落在当前 Y 轴范围内时画 ——
+               超出的部分由下面的 overhead 提示接手，不静默省略。 -->
+          {#each valueLines as g (g.index)}
+            <line
+              x1={PAD.left}
+              y1={y(g.target)}
+              x2={W - PAD.right}
+              y2={y(g.target)}
+              stroke="var(--text-tertiary)"
+              stroke-width="1"
+              stroke-dasharray="6 4"
+              opacity="0.6"
+            />
+          {/each}
+
+          <!-- 达成时点的竖线。放在曲线之上、选中十字线之下。 -->
+          {#each markers as g (g.index)}
+            <line
+              x1={x(g.month)}
+              y1={PAD.top}
+              x2={x(g.month)}
+              y2={PAD.top + PLOT_H}
+              stroke="var(--accent)"
+              stroke-width="1"
+              stroke-dasharray="3 3"
+              opacity="0.55"
+            />
+            <!-- 圆点只对「提取」目标画：它的 target 是组合总值，那个月曲线
+                 恰好穿过它。吃息目标的 target 是**年化股息**，画到这条
+                 「组合总值」的 Y 轴上毫无意义（股息比总值小两个数量级，
+                 点会落在轴外），所以只留竖线。 -->
+            {#if g.criterion === 'value'}
+              <circle cx={x(g.month)} cy={y(g.target)} r="3.5" fill="var(--accent)" opacity="0.75" />
+            {/if}
+          {/each}
+
           {#if selected}
             <line
               x1={x(selected.month)}
@@ -367,6 +449,14 @@
             />
           {/if}
         </g>
+
+        <!-- 序号 chip 放在裁剪组**外面**：贴着图顶，被裁掉就没意义了。 -->
+        {#each markers as g (g.index)}
+          <g class="chip" transform="translate({chipX(g.month)}, {PAD.top + 3})">
+            <rect x="-10" y="-1" width="20" height="16" rx="8" />
+            <text x="0" y="11" text-anchor="middle">{g.index}</text>
+          </g>
+        {/each}
       </svg>
 
       {#if selected}
@@ -429,8 +519,43 @@
     <div class="legend">
       <span class="key"><i class="swatch accent"></i>组合总值</span>
       <span class="key"><i class="swatch dashed"></i>累计投入本金</span>
+      {#if markers.length > 0 || overhead.length > 0}
+        <span class="key"><i class="swatch goal"></i>目标达成时点</span>
+      {/if}
       <span class="key tiny">滚轮缩放 · 拖动平移 · 点击看单月</span>
     </div>
+
+    {#if unreached.length > 0}
+      <p class="tiny goal-note">
+        {unreached.length} 个目标在这个年限内没有达成时间，图上无从标注
+        {#if unreached.length === 1}（{unreached[0].label}）{/if}。
+      </p>
+    {/if}
+
+    {#if overhead.length > 0}
+      <!-- 「目标高过当前视野峰值」这句话**曾经画在图里**（贴顶、右对齐）。
+           两个毛病：它和贴顶的序号 chip 抢同一条带，chip 一多就压在字上；
+           而且右对齐正好把末字顶到画布边缘，窄一点就被切。
+           它本来就是在说「什么东西没画出来」—— 和上面那句同类，
+           放在图外与图例作伴才合身，也就再没有碰撞这回事。 -->
+      <p class="tiny goal-note">
+        {overhead.length} 个提取目标高过当前视野，横线画不出来（放小或缩短年限可见）
+        {#if overhead.length === 1}：{overhead[0].label}{/if}。
+      </p>
+    {/if}
+
+    {#if markers.length > 0}
+      <!-- chip 上的序号在图里只是个记号，含义得在这儿落地。 -->
+      <ol class="goal-legend">
+        {#each markers as g (g.index)}
+          <li>
+            <span class="num">{g.index}</span>
+            <span class="name">{g.label}</span>
+            <span class="tiny">第 {formatMonths(g.month)}</span>
+          </li>
+        {/each}
+      </ol>
+    {/if}
   {/if}
 </Card>
 
@@ -489,6 +614,53 @@
     font-size: 10px;
     fill: var(--text-tertiary);
     font-family: var(--font-sans);
+  }
+
+  /* ── 目标标记 ─────────────────────────────────────────────── */
+
+  .chip rect {
+    fill: var(--accent);
+  }
+
+  .chip text {
+    font-size: 10px;
+    font-weight: 600;
+    fill: #fff;
+    font-family: var(--font-sans);
+  }
+
+  .goal-note {
+    margin: var(--gap-xs) 0 0;
+  }
+
+  .goal-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--gap-sm) var(--gap);
+    margin: var(--gap-xs) 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .goal-legend li {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .goal-legend .num {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    flex: 0 0 auto;
   }
 
   /* ── 单月明细浮层 ─────────────────────────────────────────── */
@@ -626,6 +798,17 @@
       90deg,
       var(--text-tertiary) 0 4px,
       transparent 4px 7px
+    );
+  }
+
+  /* 竖线的图例：一小段竖虚线，与图上标记同色同形。 */
+  .swatch.goal {
+    width: 2px;
+    height: 13px;
+    background: repeating-linear-gradient(
+      180deg,
+      var(--accent) 0 3px,
+      transparent 3px 6px
     );
   }
 

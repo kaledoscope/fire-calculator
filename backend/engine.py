@@ -19,11 +19,10 @@ from backend.models import (
     AssetSnapshot,
     Config,
     DividendMode,
+    FireGoalHit,
+    FireMode,
     FireSummary,
-    FireTargetRow,
-    Milestone,
-    MilestoneHit,
-    MilestoneKind,
+    GoalCriterion,
     MonthlySnapshot,
     SafeRateResult,
     SensitivityRow,
@@ -248,6 +247,7 @@ def _run_projection(
 
         # ③④⑤ 派息 → 扣税 → 处置税后股息
         month_dividend = 0.0
+        month_dividend_net = 0.0
         for asset in config.assets:
             symbol = asset.symbol
             gross = shares[symbol] * dividend_per_share[symbol] / 12.0
@@ -261,6 +261,7 @@ def _run_projection(
             tax = gross * config.tax.dividend_tax
             net = gross - tax
             month_dividend += gross
+            month_dividend_net += net
             cumulative_dividend += gross
             cumulative_tax += tax
 
@@ -302,6 +303,7 @@ def _run_projection(
                 total_value=stock_value + cash_total,
                 total_invested=total_invested,
                 month_dividend=month_dividend,
+                month_dividend_net=month_dividend_net,
                 cumulative_dividend=cumulative_dividend,
                 cumulative_tax=cumulative_tax,
                 rebalanced=rebalanced,
@@ -320,11 +322,14 @@ def simulate(config: Config, as_of: date | None = None) -> SimulationResult:
     monthly, invested, cum_dividend, cum_tax, initial_value = _run_projection(config)
     final = monthly[-1] if monthly else None
 
+    # 目标只算一次，摘要与敏感度共用 —— 两处各算一遍的话，一旦口径有出入
+    # 就会出现「表里说第 208 月达标、敏感度基准却按另一个数算」。
+    goals = _fire_goals(config, monthly)
+
     return SimulationResult(
         monthly=monthly,
-        milestones=_find_milestones(config, monthly),
-        sensitivity=_sensitivity(config, monthly),
-        fire=_fire_summary(config, monthly),
+        sensitivity=_sensitivity(config, monthly, goals),
+        fire=_fire_summary(config, goals),
         initial_value=initial_value,
         final_value=final.total_value if final else 0.0,
         final_invested=invested,
@@ -347,88 +352,177 @@ def _first_reach(monthly: list[MonthlySnapshot], amount: float) -> int | None:
     return None
 
 
-def _find_milestones(
-    config: Config, monthly: list[MonthlySnapshot]
-) -> list[MilestoneHit]:
-    hits: list[MilestoneHit] = []
+def _inflation_factor(config: Config, month: int) -> float:
+    """第 month 个月对应的通胀倍数。
 
-    # 用户显式设定的里程碑
-    for ms in config.fire.milestones:
-        amount = config.resolve_milestone_amount(ms)
-        month = _first_reach(monthly, amount)
-        hits.append(
-            MilestoneHit(
-                label=ms.label, amount=amount, month=month, reached=month is not None
+    用「已过完整年数」而不是按月连续折算 —— 必须与 `project_withdrawal`
+    的口径一致：那里是 `(1+i) ** (year - 1)`、year 从 1 起，也就是**第 1 年
+    用今天的钱**。两处不一致的话，同一个通胀率会给出两个答案。
+    """
+    return (1.0 + config.settings.inflation_rate) ** ((month - 1) // 12)
+
+
+def _first_reach_income(
+    config: Config,
+    monthly: list[MonthlySnapshot],
+    annual_today: float,
+    adjusted: bool = True,
+) -> int | None:
+    """首次「年化税后股息 ≥ 当年通胀调整后的年支出」的月份。
+
+    逐年比，而不是拿一个固定门槛比全程 —— 门槛自己会涨。这正是用户说的
+    「以现在持续到当时的通胀后的金额来确定到底哪一年的股息能够覆盖」。
+
+    关掉 `adjusted` 即门槛取固定值，等价于通胀率取 0，所以不必另写一条。
+
+    ⚠️ 用 `month_dividend_net`（税后），不是 `month_dividend`（税前）。
+    吃息退休花的是到手的钱；用税前判会系统性高估达成速度。
+    """
+    for snap in monthly:
+        target = annual_today * (_inflation_factor(config, snap.month) if adjusted else 1.0)
+        if snap.month_dividend_net * 12.0 >= target - _EPS:
+            return snap.month
+    return None
+
+
+def _income_target_at(config: Config, annual_today: float, month: int, adjusted: bool) -> float:
+    """某个目标在第 month 个月的门槛。"""
+    return annual_today * (_inflation_factor(config, month) if adjusted else 1.0)
+
+
+def blended_dividend_growth(config: Config) -> float | None:
+    """组合加权股息增长率，按各标的的**股息贡献**加权。
+
+    为什么不是简单按占比加权：真正决定明年能收到多少股息的，是这个标的
+    今年派了多少，而不是它在组合里占多少市值。一只 0.1% 股息的成长股
+    占比再大，也不影响股息增速。
+
+    全部标的股息率为 0 时返回 None —— 那种组合没有「股息增长率」可言，
+    硬给一个 0% 会让人以为预测过。
+    """
+    weights = [a.params.dividend_yield for a in config.assets]
+    total = sum(weights)
+    if total <= _EPS:
+        return None
+    return sum(
+        a.params.dividend_growth * a.params.dividend_yield for a in config.assets
+    ) / total
+
+
+def _fire_goals(config: Config, monthly: list[MonthlySnapshot]) -> list[FireGoalHit]:
+    """把当前模式下的全部目标，算成统一的达成情况列表。
+
+    两种方式各产出一组 `FireGoalHit`，只有判据不同（`criterion`）：
+        提取退休    组合总值 ≥ 年支出 × 倍数
+        吃息退休    年化税后股息 ≥ 当年通胀调整后的年支出
+
+    两者都回答「第几个月首次达标」，而不是只给一个「够 / 不够」的布尔值。
+    """
+    final = monthly[-1] if monthly else None
+    # 期末的年化股息。两种模式都填 —— 提取模式的行虽不显示它，但让 JSON
+    # 里同一个字段在任何模式下都有意义，好过留一堆 0 让人猜是不是没算。
+    have_net = (final.month_dividend_net * 12.0) if final else 0.0
+    have_gross = (final.month_dividend * 12.0) if final else 0.0
+    hits: list[FireGoalHit] = []
+
+    if config.fire.mode is FireMode.INCOME:
+        for i, goal in enumerate(config.fire.income_goals):
+            label = goal.label or f"目标 {i + 1}"
+            annual_today = goal.annual_today
+            adjusted = goal.inflation_adjusted
+
+            month = _first_reach_income(config, monthly, annual_today, adjusted)
+
+            if month is not None:
+                target = _income_target_at(config, annual_today, month, adjusted)
+                progress = 1.0
+            else:
+                # 看期末那一天差多少，而不是含糊的「未达成」。
+                last_month = final.month if final else 1
+                target = _income_target_at(config, annual_today, last_month, adjusted)
+                progress = min(1.0, have_net / target) if target > _EPS else 0.0
+
+            hits.append(
+                FireGoalHit(
+                    label=label,
+                    criterion=GoalCriterion.INCOME,
+                    target=target,
+                    target_today=annual_today,
+                    monthly_today=goal.monthly_expense,
+                    inflation_adjusted=adjusted,
+                    month=month,
+                    reached=month is not None,
+                    progress=progress,
+                    current_annual_net=have_net,
+                    current_annual_gross=have_gross,
+                    detail="税后股息覆盖月支出",
+                )
             )
-        )
-
-    # FIRE 档位自动成为里程碑（A15）
-    for tier in config.fire.tiers:
-        amount = tier.number
-        month = _first_reach(monthly, amount)
-        hits.append(
-            MilestoneHit(
-                label=f"{tier.name} FIRE",
-                amount=amount,
-                month=month,
-                reached=month is not None,
+    else:
+        for tier in config.fire.tiers:
+            amount = tier.number
+            month = _first_reach(monthly, amount)
+            have = final.total_value if final else 0.0
+            hits.append(
+                FireGoalHit(
+                    label=f"{tier.name} FIRE",
+                    criterion=GoalCriterion.VALUE,
+                    target=amount,
+                    month=month,
+                    reached=month is not None,
+                    progress=min(1.0, have / amount) if amount > _EPS else 0.0,
+                    current_annual_net=have_net,
+                    current_annual_gross=have_gross,
+                    detail="年支出 × 倍数",
+                )
             )
-        )
 
-    hits.sort(key=lambda h: h.amount)
+    hits.sort(key=lambda h: (h.month is None, h.month or 0))
     return hits
 
 
-def _fire_summary(config: Config, monthly: list[MonthlySnapshot]) -> FireSummary:
-    """Coast / Barista 的达标情况（档位另有 _find_milestones 负责）。
-
-    三者口径不同，值得说清楚：
-        FIRE 档位   年支出 × 倍数 —— 现在就该有的**全部**本金
-        Coast       上面那个数再除以 (1+g)^n —— 现在只需存够这么多，
-                    剩下的交给复利。所以它比 FIRE Number 小得多。
-        Barista     (年支出 − 兼职收入) × 倍数 —— 兼职顶掉一部分开销。
-
-    三者都在同一个时间轴上比 —— 用「第几个月首次达到」说话，
-    而不是只给一个「够 / 不够」的布尔值。
-    """
-
-    def row(label: str, amount: float) -> FireTargetRow:
-        month = _first_reach(monthly, amount)
-        return FireTargetRow(
-            label=label, amount=amount, month=month, reached=month is not None
-        )
-
-    coast = None
-    if config.fire.coast is not None:
-        coast = row("Coast FIRE", config.fire.coast.coast_number())
-
-    barista = None
-    if config.fire.barista is not None:
-        barista = row("Barista FIRE", config.fire.barista.barista_number())
-
+def _fire_summary(config: Config, goals: list[FireGoalHit]) -> FireSummary:
+    growth = (
+        blended_dividend_growth(config)
+        if config.fire.mode is FireMode.INCOME
+        else None
+    )
     return FireSummary(
-        tiers=[row(f"{t.name} FIRE", t.number) for t in config.fire.tiers],
-        coast=coast,
-        barista=barista,
+        mode=config.fire.mode,
+        goals=goals,
+        dividend_growth=growth,
+        inflation_rate=config.settings.inflation_rate,
+        real_dividend_growth=(
+            growth - config.settings.inflation_rate if growth is not None else None
+        ),
     )
 
 
-def _primary_milestone(config: Config) -> float | None:
-    """敏感度分析锚定哪个目标？优先第一个 FIRE 档位，否则最大的固定里程碑。"""
-    if config.fire.tiers:
-        return config.fire.tiers[0].number
+def _primary_target(
+    goals: list[FireGoalHit],
+) -> tuple[GoalCriterion, float, bool] | None:
+    """敏感度分析锚定哪个目标？第一个 FIRE 目标。
 
-    fixed = [
-        config.resolve_milestone_amount(ms)
-        for ms in config.fire.milestones
-        if ms.kind is MilestoneKind.FIXED
-    ]
-    return max(fixed) if fixed else None
+    返回 (判据, **判据自己的输入**, 是否通胀折算)。敏感度表要按同一种口径
+    重算，否则吃息模式下会拿组合总值去比一个股息门槛。
+
+    ⚠️ 吃息返回的是 `target_today` 而**不是** `target`：后者是折算到某个
+    月份之后的数，已经含了通胀因子；再喂给 `_first_reach_income` 就会
+    把通胀乘两遍，达标月份被系统性推迟。
+    """
+    if not goals:
+        return None
+    first = goals[0]
+    if first.criterion is GoalCriterion.INCOME:
+        base = first.target_today if first.target_today is not None else first.target
+        return first.criterion, base, first.inflation_adjusted
+    return first.criterion, first.target, False
 
 
 def _sensitivity(
     config: Config,
     monthly: list[MonthlySnapshot],
+    goals: list[FireGoalHit],
     deltas: tuple[float, ...] = (0.0, -0.01, -0.02, -0.03),
 ) -> list[SensitivityRow]:
     """FR-014：主结果旁常驻「增长率降档后要多久」。
@@ -438,10 +532,14 @@ def _sensitivity(
     **基准行（delta = 0）也在列表里**：它不是多算一遍，而是直接复用主
     结果已经算出的 monthly。这样表格自带基准，读者不必在两个地方对照；
     同时它保证了基准行的数字与主结果**同源**，不可能对不上。
+
+    判据跟着目标的 `criterion` 走 —— 吃息模式下要重算的是「年化税后股息
+    何时追上通胀后的门槛」，拿组合总值去比会得出一个毫无意义的月份。
     """
-    target = _primary_milestone(config)
-    if target is None:
+    anchor = _primary_target(goals)
+    if anchor is None:
         return []
+    criterion, target, adjusted = anchor
 
     rows: list[SensitivityRow] = []
     for delta in deltas:
@@ -457,7 +555,11 @@ def _sensitivity(
                 asset.params.price_growth += delta
             series, *_rest = _run_projection(weakened)
 
-        month = _first_reach(series, target)
+        if criterion is GoalCriterion.INCOME:
+            month = _first_reach_income(config, series, target, adjusted)
+        else:
+            month = _first_reach(series, target)
+
         rows.append(
             SensitivityRow(delta=delta, month=month, reached=month is not None)
         )
@@ -603,11 +705,3 @@ def blended_growth_rate(config: Config, include_dividends: bool = True) -> float
             growth += asset.params.dividend_yield * (1.0 - config.tax.dividend_tax)
         total += share * growth
     return total
-
-
-def find_milestone(config: Config, label: str) -> Milestone | None:
-    """按标签找一个里程碑。"""
-    for ms in config.fire.milestones:
-        if ms.label == label:
-            return ms
-    return None

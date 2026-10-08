@@ -621,7 +621,13 @@ const expandedH = await bodyHeight()
 ok('展开时卡片主体有高度', expandedH > 100, `${Math.round(expandedH)}px`)
 
 const chevron = firstCard.locator('.chevron')
-ok('每张卡右上角都有折叠箭头', (await page.locator('.card .chevron').count()) >= 11, `${await page.locator('.card .chevron').count()} 个`)
+// 比的是**箭头数 == 卡片数**这个不变量，不是一个「至少 11 个」的魔数：
+// 魔数只能证明「卡片没被删光」，加减一张卡就得跟着改，改的时候还容易
+// 顺手把阈值调成当前值 —— 那样它从此再也不检查任何东西。
+const cardCount = await page.locator('.card').count()
+const chevronCount = await page.locator('.card .chevron').count()
+ok('每张卡右上角都有折叠箭头', chevronCount === cardCount && cardCount > 0,
+  `${chevronCount} 个箭头 / ${cardCount} 张卡`)
 ok('箭头默认是展开态', (await chevron.getAttribute('aria-expanded')) === 'true')
 
 await chevron.click()
@@ -1200,6 +1206,161 @@ for (const vp of [1440, 1100, 900]) {
 }
 await page.setViewportSize({ width: 1440, height: 1000 })
 
+// ══ ⑱ FIRE 目标：吃息 / 提取 两种退休方式 ══════════════════════════
+//
+// 对应需求里的三件事，每件都能证伪：
+//   ① 两种方式**一次只用一种**，切换要真的换掉整块界面；
+//   ② 吃息目标可以填多个，✕ 删的是**整条目标**而不是旁边那一格
+//      —— 定投阶段卡正是在这里栽过（见上面 ✕ 那段）；
+//   ③ 「里程碑」与「变体」两节彻底消失。
+const fireCard = page.locator('.card').filter({ has: page.locator('.retire-modes') })
+const fireText = async () => (await fireCard.innerText()).replace(/\s+/g, ' ')
+const modeState = async () =>
+  page.evaluate(() =>
+    [...document.querySelectorAll('.mode-btn')]
+      .map((b) => `${b.innerText.split('\n')[0]}=${b.getAttribute('aria-pressed')}`)
+      .join(' '),
+  )
+
+ok('FIRE 目标卡在页面上（下面几条不是空转）', (await fireCard.count()) === 1)
+// 默认必须是「提取退休」。换成吃息会让老配置的数字**无声无息**变一套。
+ok('默认方式是提取退休', /提取退休=true/.test(await modeState()), await modeState())
+ok('里程碑整节已删', !/里程碑/.test(await fireText()))
+ok('变体整节已删（Coast / Barista 一并消失）', !/变体|Coast|Barista/.test(await fireText()))
+
+// 吃息模式下目标行的几何：✕ 要在右上角，且**不压**月支出框。
+async function goalGeometry(i = 0) {
+  return page.evaluate((i) => {
+    const goal = document.querySelectorAll('.goal')[i]
+    if (!goal) return null
+    const box = (el) => el.getBoundingClientRect()
+    const input = box(goal.querySelector('input[type=number]'))
+    const close = box(goal.querySelector('.close'))
+    const goalBox = box(goal)
+    // 互压必须**两个方向都相交**才算 —— 只比 X 会得到一条假红
+    const overlap = (a, b) =>
+      Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) > 0 &&
+      Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)) > 0
+    return {
+      closeTop: Math.round(close.top - goalBox.top),
+      closeRight: Math.round(goalBox.right - close.right),
+      inputCloseOverlap: overlap(input, close),
+    }
+  }, i)
+}
+
+// 回到「提取退休」确认档位区还在，再切回来 —— 切换本身也要能来回
+await page.locator('.mode-btn').filter({ hasText: '吃息退休' }).click()
+await page.waitForTimeout(200)
+ok('切到吃息后模式状态翻转', /吃息退休=true/.test(await modeState()), await modeState())
+// 选择器一律**收在 FIRE 卡里**：`.chip` 在标的卡上也有（预设标的），
+// `.goal` 会命中 GrowthChart 的 `swatch goal` —— 全局选择器在这里是假绿/假红
+// 的温床，前一步 `.mode` 撞名就是这么栽的。
+ok('吃息分支出现月支出输入框', (await fireCard.locator('#ig-0').count()) === 1)
+ok('吃息分支不再显示档位 chips', (await fireCard.locator('.chip').count()) === 0)
+
+await fireCard.locator('.add').click()
+await page.waitForTimeout(150)
+const goalRows = await fireCard.locator('.goal').count()
+ok('可以填多个目标', goalRows === 2, `${goalRows} 行`)
+
+const g0 = await goalGeometry(0)
+ok(`${'吃息目标'}：✕ 就在右上角`, g0 !== null && g0.closeTop <= 12 && g0.closeRight <= 12,
+  g0 && `距顶 ${g0.closeTop}px，距右 ${g0.closeRight}px`)
+ok('吃息目标：✕ 不压月支出框', g0 !== null && !g0.inputCloseOverlap, JSON.stringify(g0))
+
+// 勾选框必须保持原生尺寸。全局那条 `input { width: 100% }` 会连
+// `<input type="checkbox">` 一起拉成整行宽（实测 404px），旁边的说明文字只剩
+// 24px 宽、一句话折成 30 行、435px 高 —— 整张卡的留白全被它一个撑坏。
+// 而这个坏法**一条红灯都不会亮**：SSR 自检只看文字，端到端量的是 ✕ 与输入框，
+// 谁也没在看勾选框。这条是补上那个缺口，不是重复检查。
+const boxShot = await fireCard.locator('.goal .check input').first().boundingBox()
+const checkRow = await fireCard.locator('.goal .check').first().boundingBox()
+ok('吃息目标的勾选框是原生尺寸', boxShot.width <= 40 && boxShot.height <= 40,
+  `${Math.round(boxShot.width)}×${Math.round(boxShot.height)}px`)
+ok('勾选框旁的说明没被挤成多行', checkRow.height <= 60, `整行高 ${Math.round(checkRow.height)}px`)
+
+// 吃息模式下重跑可辨识性扫描 —— 新增的输入框也得自己说明自己可填
+const affIncome = await inputAffordance()
+ok('吃息模式下没有边框透明的输入框', affIncome.noBorder.length === 0,
+  affIncome.noBorder.join(' | ') || `全 ${affIncome.total} 个都可见`)
+ok('吃息模式下灰面板上的输入框真的浮起来', affIncome.flatOnPanel.length === 0,
+  affIncome.flatOnPanel.join(' | ') || '无')
+
+// 三个视口都要量：1440 会把问题盖住，吃息目标行是新增的窄容器
+for (const vp of [1440, 1100, 900]) {
+  await page.setViewportSize({ width: vp, height: 1000 })
+  await page.waitForTimeout(250)
+  const o = await pageOverflowX()
+  ok(`${vp}px（吃息）：全页没有横向溢出`, o.x <= 0, `溢出 ${o.x}px（最右输入框到 ${o.widest}，视口 ${o.viewport}）`)
+  const gi = await goalGeometry(0)
+  ok(`${vp}px（吃息）：✕ 仍在右上角`, gi !== null && gi.closeTop <= 12 && gi.closeRight <= 12,
+    gi && `距顶 ${gi.closeTop}px，距右 ${gi.closeRight}px`)
+}
+await page.setViewportSize({ width: 1440, height: 1000 })
+
+// 一路走到底：改模式 → 计算 → 结果侧真的换成吃息口径。
+// 这条把「前端切模式 → 配置变了 → 后端按新口径算 → 右侧渲染」整条链串起来，
+// 上面那些 DOM 断言只证明界面翻了面，证明不了后面这几步。
+await compute()
+const fireResult = (await page.locator('.card').filter({ hasText: 'FIRE 进度' }).innerText()).replace(/\s+/g, ' ')
+ok('结果侧跟着换成吃息口径', /吃息/.test(fireResult) && !/提取/.test(fireResult), fireResult.slice(0, 70))
+ok('吃息行显示「今日购买力 → 达成当年」', /今日购买力/.test(fireResult), fireResult.slice(0, 70))
+// 措辞是「**期末**税后股息」而不是「当前」：这两个数取自序列最后一个月，
+// 而已达成的那一行上面写的是「达成当年门槛」—— 用「当前」去指期末，
+// 读者会拿它去对达成那一年，然后以为算错了。断言连措辞一起钉住。
+ok(
+  '吃息行同时给出期末税前与税后股息',
+  /期末税后股息/.test(fireResult) && /税前/.test(fireResult),
+  fireResult.slice(0, 70),
+)
+
+// 图表标注分两条路，两条都要走到：
+//   ① 没达成 → 必须**说出来**，不能画一张干净的图让人以为功能不存在；
+//   ② 达成   → 竖线、序号 chip、图例三样都要出现。
+const chartText = async () =>
+  (await page.locator('.card').filter({ hasText: '增长曲线' }).innerText()).replace(/\s+/g, ' ')
+ok('目标未达成时，图上明说「没有达成时间」', /没有达成时间/.test(await chartText()), (await chartText()).slice(0, 80))
+
+// ② 换成「提取」模式验达成那一条路。这个选择是有讲究的：提取目标的
+// 阈值是**组合总值**，把一个档位设成 $1 就由构造保证必然达成，与跑在
+// 前面的用例把组合改成什么样无关。吃息做不到这一点 —— 剩下那支标的
+// 股息率若是 0，门槛再低也永远达不成（实测在这一步踩到过）。
+await fireCard.locator('.mode-btn').filter({ hasText: '提取退休' }).click()
+await page.waitForTimeout(250)
+if ((await fireCard.locator('.tier').count()) === 0) {
+  await fireCard.locator('.chip').first().click()
+  await page.waitForTimeout(150)
+}
+await fireCard.locator('#tn-0').fill('1')
+await fireCard.locator('#tm-0').fill('1')
+await compute()
+
+const reachedChart = await chartText()
+ok('达成后图上出现目标图例', /目标达成时点/.test(reachedChart), reachedChart.slice(0, 80))
+const chipCount = await page.locator('svg .chip').count()
+ok('达成后图里打出序号 chip', chipCount > 0, `${chipCount} 个`)
+ok('图例列出目标的达成时间', /第 \d+ 年|第 \d+ 个月/.test(reachedChart))
+// 默认档位里 Fat 是 300 万，远高于这个组合的期末总值 —— 它画不出横线，
+// 但**必须留下痕迹**，不能悄悄消失（「绝不静默省略」）。
+ok('画不下的目标明说「高过当前视野」', /高过当前视野/.test(reachedChart))
+
+// 而且这句话必须落在图**外面**。它原先画在图里、贴顶右对齐，实测两个毛病：
+// 与贴顶的序号 chip 抢同一条带（chip 压字），且末字正好顶到画布右缘被切。
+// 断言「svg 的文字里没有它」，是因为「换个位置摆」这种修法下次还会再撞 ——
+// 图外的段落才是不可能碰撞的形状。
+// ⚠️ 取文字必须用 `textContent`，**不能用 `allInnerTexts()`**：SVG 的 `<text>`
+// 没有 `innerText`，Playwright 对每个元素都返回空串。写成 innerText 时这条
+// 断言恒为真 —— 撤销修复、把提示搬回图里，它照样绿（实测：13 个元素全空）。
+// 一条永远绿的红灯比不写还糟。
+const svgTexts = await page
+  .locator('svg text')
+  .evaluateAll((els) => els.map((e) => e.textContent ?? ''))
+ok(
+  '高过视野的提示不在 svg 里（不与 chip 抢同一条带）',
+  !svgTexts.some((t) => /高过当前视野/.test(t)),
+  svgTexts.join(' | ').slice(0, 80),
+)
 
 // ══ 收尾 ═════════════════════════════════════════════════════════
 ok('全程无控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '))

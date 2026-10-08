@@ -1,39 +1,41 @@
 <script>
   import Card from './Card.svelte'
 
-  /** FR-006 FIRE 目标设定 + 里程碑 */
+  /** FR-006 FIRE 目标设定 —— 吃息退休 / 提取退休。
+   *
+   * 两种方式同一时间**只用一种**，不是两笔可以叠加的账：两者的区别是
+   * 本金「消耗」还是「不动」，混在一起算会把同一笔钱数两遍。
+   */
   let { config, rates = null } = $props()
 
-  // 标签刻意**不带货币符号**：金额是美元，但显示时会被换算成所选货币。
-  // 若标签写死「$100,000」，切到日元就会看到「$100,000 ¥100,000」——
-  // 标签和金额自相矛盾。货币由金额那一栏统一表达。
-  const milestonePresets = [
-    { label: '10K', amount: 10000, note: '起步关，多数人在这里第一次感到复利' },
-    { label: '100K', amount: 100000, note: '公认最难的一关' },
-    { label: '250K', amount: 250000, note: '四分之一' },
-    { label: '500K', amount: 500000, note: 'Lean FIRE 领域' },
-    { label: '1M', amount: 1000000, note: '传统 FIRE 数字' },
-    { label: '2M', amount: 2000000, note: '雪球变雪崩' },
+  const MODES = [
+    {
+      id: 'income',
+      name: '吃息退休',
+      en: 'Income FIRE',
+      short: '本金不动',
+      intro:
+        '门槛 = 你当年的生活支出，达标 = 那一年的**税后**股息覆盖得了它。本金一直不动，所以花的是股息本身。',
+    },
+    {
+      id: 'withdrawal',
+      name: '提取退休',
+      en: 'Withdrawal FIRE',
+      short: '卖出本金',
+      intro:
+        'FIRE Number = 年支出 × 倍数。4% 规则对应 25×；想提前退休通常用 28.6×（3.5%）。本金会被逐步卖出。',
+    },
   ]
 
-  function hasMilestone(amount) {
-    return config.fire.milestones.some(
-      (m) => m.kind === 'fixed' && m.amount === amount,
-    )
-  }
+  const mode = $derived(MODES.find((m) => m.id === config.fire.mode) ?? MODES[1])
 
-  function toggleMilestone(preset) {
-    const index = config.fire.milestones.findIndex(
-      (m) => m.kind === 'fixed' && m.amount === preset.amount,
-    )
-    if (index >= 0) config.fire.milestones.splice(index, 1)
-    else
-      config.fire.milestones.push({
-        label: preset.label,
-        kind: 'fixed',
-        amount: preset.amount,
-      })
-  }
+  // ── 提取退休：档位 ─────────────────────────────────────────────
+
+  const tierPresets = [
+    { name: 'Lean', expense: 30000, note: '极简退休' },
+    { name: 'Regular', expense: 60000, note: '常规' },
+    { name: 'Fat', expense: 120000, note: '富裕' },
+  ]
 
   function toggleTier(name, expense) {
     const index = config.fire.tiers.findIndex((t) => t.name === name)
@@ -45,127 +47,281 @@
     return config.fire.tiers.some((t) => t.name === name)
   }
 
-  const tierPresets = [
-    { name: 'Lean', expense: 30000, note: '极简退休' },
-    { name: 'Regular', expense: 60000, note: '常规' },
-    { name: 'Fat', expense: 120000, note: '富裕' },
-  ]
+  // ── 吃息退休：目标列表 ─────────────────────────────────────────
 
+  function addGoal() {
+    config.fire.income_goals.push({
+      label: '',
+      monthly_expense: 3000,
+      inflation_adjusted: true,
+    })
+  }
+
+  function removeGoal(index) {
+    config.fire.income_goals.splice(index, 1)
+  }
+
+  /**
+   * 标签刻意**不带货币符号**：金额是美元，但显示时会被换算成所选货币。
+   * 若标签写死「$100,000」，切到日元就会看到「$100,000 ¥100,000」——
+   * 标签和金额自相矛盾。货币由金额那一栏统一表达。
+   */
   function cash(n) {
-    return `$${n.toLocaleString('en-US')}`
+    return `$${Math.round(n).toLocaleString('en-US')}`
   }
 </script>
 
 <Card title="FIRE 目标">
-  <p class="tiny intro">
-    FIRE Number = 年支出 × 倍数。4% 规则对应 25×；想提前退休通常用 28.6×（3.5%）。
-  </p>
-
-  <h3 class="sub-head">档位</h3>
-  <div class="chips">
-    {#each tierPresets as preset (preset.name)}
+  <!-- 退休方式。放在最上面：它决定了下面整张卡长什么样，
+       埋在中间会让人先填完一堆再发现填错了口径。 -->
+  <div class="retire-modes" role="group" aria-label="退休方式">
+    {#each MODES as m (m.id)}
       <button
-        class="chip"
-        class:on={hasTier(preset.name)}
-        onclick={() => toggleTier(preset.name, preset.expense)}
+        class="mode-btn"
+        class:on={config.fire.mode === m.id}
+        onclick={() => (config.fire.mode = m.id)}
+        aria-pressed={config.fire.mode === m.id}
       >
-        <span class="chip-name">{preset.name}</span>
-        <span class="chip-note">{preset.note} · {cash(preset.expense)}/年</span>
+        <span class="mode-name">{m.name}</span>
+        <span class="mode-note">{m.short} · {m.en}</span>
       </button>
     {/each}
   </div>
 
-  {#if config.fire.tiers.length > 0}
-    <div class="tiers">
-      {#each config.fire.tiers as tier, i (i)}
-        <div class="row tier">
-          <div class="field">
-            <label for="tn-{i}">{tier.name} · 年支出</label>
-            <input id="tn-{i}" type="number" step="1000" min="0" bind:value={tier.annual_expense} />
+  <p class="tiny intro">{mode.intro.replaceAll('**', '')}</p>
+
+  {#if config.fire.mode === 'income'}
+    <h3 class="sub-head">目标</h3>
+    <p class="tiny lede">
+      按<strong>今天的购买力</strong>填月支出 —— 引擎会把它折算到达成那年，再和当年的税后股息比。
+      可以填多个，各自算各自的达成时间。
+    </p>
+
+    {#if config.fire.income_goals.length === 0}
+      <p class="muted empty">还没有目标。点下面的「添加目标」开始。</p>
+    {/if}
+
+    <div class="goals">
+      {#each config.fire.income_goals as goal, i (i)}
+        <div class="goal">
+          <div class="row main">
+            <div class="field">
+              <label for="ig-{i}">目标 {i + 1} · 月支出</label>
+              <div class="suffixed">
+                <input
+                  id="ig-{i}"
+                  type="number"
+                  step="100"
+                  min="0"
+                  bind:value={goal.monthly_expense}
+                />
+                <span class="suffix">/月</span>
+              </div>
+            </div>
+
+            <div class="computed">
+              <span class="tiny">年支出</span>
+              <strong>{cash(goal.monthly_expense * 12)}</strong>
+            </div>
+
+            <!-- 与标的卡、阶段卡同一套 ✕：右上角、圆形。
+                 它删的是**整条目标**，所以绝不能和月支出框同行 ——
+                 挨着某个输入框时，人只会以为删的是那一格。 -->
+            <button class="icon close" onclick={() => removeGoal(i)} title="删除这个目标">✕</button>
           </div>
-          <div class="field narrow">
-            <label for="tm-{i}">倍数</label>
-            <input id="tm-{i}" type="number" step="0.5" min="1" bind:value={tier.multiple} />
-          </div>
-          <div class="computed">
-            <span class="tiny">目标</span>
-            <strong>{cash(Math.round(tier.annual_expense * tier.multiple))}</strong>
-          </div>
+
+          <label class="check">
+            <input type="checkbox" bind:checked={goal.inflation_adjusted} />
+            <span>
+              按通胀折算到达成当年
+              <span class="tiny why">
+                —— 关掉就用今天的金额当固定门槛，等于假设物价不涨
+              </span>
+            </span>
+          </label>
         </div>
       {/each}
     </div>
-  {/if}
 
-  <div class="divider"></div>
-
-  <h3 class="sub-head">里程碑</h3>
-  <p class="tiny">勾选要在报告里看到达成时间的金额档。</p>
-  <div class="chips">
-    {#each milestonePresets as preset (preset.label)}
-      <button
-        class="chip compact"
-        class:on={hasMilestone(preset.amount)}
-        onclick={() => toggleMilestone(preset)}
-        title={preset.note}
-      >
-        {preset.label}
-      </button>
-    {/each}
-  </div>
-
-  <div class="divider"></div>
-
-  <h3 class="sub-head">变体</h3>
-  <div class="row">
-    <div class="field">
-      <label for="coast">Coast FIRE · 距退休年数</label>
-      <input
-        id="coast"
-        type="number"
-        step="1"
-        min="1"
-        bind:value={config.fire.coast.years_to_retirement}
-      />
-      <p class="tiny hint">现在存够一笔，之后不再定投也能到期达标</p>
+    <button class="ghost add" onclick={addGoal}>＋ 添加目标</button>
+  {:else}
+    <h3 class="sub-head">档位</h3>
+    <div class="chips">
+      {#each tierPresets as preset (preset.name)}
+        <button
+          class="chip"
+          class:on={hasTier(preset.name)}
+          onclick={() => toggleTier(preset.name, preset.expense)}
+        >
+          <span class="chip-name">{preset.name}</span>
+          <span class="chip-note">{preset.note} · {cash(preset.expense)}/年</span>
+        </button>
+      {/each}
     </div>
-    <div class="field">
-      <label for="coastg">Coast · 折现增长率</label>
-      <div class="suffixed">
-        <input
-          id="coastg"
-          type="number"
-          step="0.1"
-          value={((config.fire.coast.growth_rate || 0) * 100).toFixed(1)}
-          oninput={(e) =>
-            (config.fire.coast.growth_rate = (Number(e.currentTarget.value) || 0) / 100)}
-        />
-        <span class="suffix">%</span>
+
+    {#if config.fire.tiers.length > 0}
+      <div class="tiers">
+        {#each config.fire.tiers as tier, i (i)}
+          <div class="row tier">
+            <div class="field">
+              <label for="tn-{i}">{tier.name} · 年支出</label>
+              <input id="tn-{i}" type="number" step="1000" min="0" bind:value={tier.annual_expense} />
+            </div>
+            <div class="field narrow">
+              <label for="tm-{i}">倍数</label>
+              <input id="tm-{i}" type="number" step="0.5" min="1" bind:value={tier.multiple} />
+            </div>
+            <div class="computed">
+              <span class="tiny">目标</span>
+              <strong>{cash(tier.annual_expense * tier.multiple)}</strong>
+            </div>
+          </div>
+        {/each}
       </div>
-    </div>
-  </div>
-
-  <div class="row">
-    <div class="field">
-      <label for="bexp">Barista · 年支出</label>
-      <input id="bexp" type="number" step="1000" min="0" bind:value={config.fire.barista.annual_expense} />
-    </div>
-    <div class="field">
-      <label for="binc">Barista · 兼职年收入</label>
-      <input id="binc" type="number" step="1000" min="0" bind:value={config.fire.barista.part_time_income} />
-      <p class="tiny hint">兼职收入覆盖一部分支出，所需本金随之降低</p>
-    </div>
-  </div>
+    {:else}
+      <p class="muted empty">还没选档位。勾一个上面的预设，或直接添加。</p>
+    {/if}
+  {/if}
 </Card>
 
 <style>
+  /* ── 退休方式分段控件 ─────────────────────────────────────── */
+
+  .retire-modes {
+    display: flex;
+    gap: 2px;
+    background: color-mix(in srgb, var(--text) 5%, transparent);
+    border-radius: 10px;
+    padding: 2px;
+    width: fit-content;
+    max-width: 100%;
+  }
+
+  .mode-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 7px 14px;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    text-align: left;
+  }
+
+  .mode-btn.on {
+    background: var(--bg-elevated);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  }
+
+  .mode-name {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .mode-note {
+    font-size: 11px;
+    color: var(--text-tertiary);
+  }
+
+  .mode-btn.on .mode-note {
+    color: var(--text-secondary);
+  }
+
   .intro {
-    margin-bottom: var(--gap);
+    margin: var(--gap-sm) 0 var(--gap);
+    line-height: 1.5;
+  }
+
+  .lede {
+    margin-bottom: var(--gap-sm);
     line-height: 1.5;
   }
 
   .sub-head {
     margin-bottom: var(--gap-sm);
   }
+
+  /* ── 吃息：目标列表 ───────────────────────────────────────── */
+
+  .goals {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap-sm);
+  }
+
+  .goal {
+    background: var(--bg-sunken);
+    border-radius: var(--radius);
+    padding: var(--gap-sm) var(--gap-sm) 10px;
+    /* ✕ 的定位基准 */
+    position: relative;
+  }
+
+  .main {
+    align-items: flex-end;
+    /* 给右上角的 ✕ 让位 */
+    padding-right: 30px;
+  }
+
+  /* 与 PlanInput / PortfolioInput 的 .close 同一套：右上角、圆形，
+     悬停转红（转红来自 app.css 里 button.icon:hover）。 */
+  .close {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 14px;
+  }
+
+  .computed {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    padding-bottom: 8px;
+    min-width: 100px;
+  }
+
+  .computed strong {
+    font-size: 16px;
+  }
+
+  .check {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    margin-top: 9px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    line-height: 1.45;
+  }
+
+  /* 尺寸与配色由 `app.css` 的 `input[type='checkbox']` 统一给 ——
+     这里只管它在这一行里的排布。 */
+  .check input {
+    flex: 0 0 auto;
+    /* 与第一行文字对齐，而不是与整段对齐 */
+    position: relative;
+    top: 2px;
+  }
+
+  .why {
+    color: var(--text-tertiary);
+  }
+
+  .add {
+    margin-top: var(--gap-sm);
+  }
+
+  /* ── 提取：档位 ───────────────────────────────────────────── */
 
   .chips {
     display: flex;
@@ -183,12 +339,6 @@
     background: var(--bg-sunken);
     color: var(--text-secondary);
     font-size: 13px;
-  }
-
-  .chip.compact {
-    padding: 7px 14px;
-    font-size: 13px;
-    font-variant-numeric: tabular-nums;
   }
 
   .chip.on {
@@ -224,23 +374,9 @@
     flex: 0 0 90px;
   }
 
-  .computed {
-    flex: 0 0 auto;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    padding-bottom: 8px;
-    min-width: 100px;
-  }
-
-  .computed strong {
-    font-size: 16px;
-  }
-
-  .divider {
-    height: 1px;
-    background: var(--border);
-    margin: var(--gap) 0;
+  .field {
+    flex: 1;
+    min-width: 0;
   }
 
   .suffixed {
@@ -258,11 +394,12 @@
   }
 
   .suffixed input {
-    padding-right: 28px;
+    padding-right: 40px;
   }
 
-  .hint {
-    margin-top: 4px;
-    line-height: 1.4;
+  .empty {
+    padding: var(--gap) 0;
+    text-align: center;
+    line-height: 1.5;
   }
 </style>
