@@ -152,12 +152,11 @@
     cursor: pointer;
   }
 
+  /* 尺寸与配色由 `app.css` 的 `input[type='checkbox']` 统一给 ——
+     这里只管它在这一行里的排布。写两份的话，漏写的那份会被全局
+     `input { width: 100% }` 抓住，方框被拉成整行宽，且没有任何检查会报红。 */
   .check input {
-    width: 16px;
-    height: 16px;
     flex: 0 0 auto;
-    accent-color: var(--accent);
-    cursor: pointer;
   }
 
   .note {

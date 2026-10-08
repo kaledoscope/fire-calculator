@@ -28,6 +28,13 @@
   --border: rgba(0, 0, 0, 0.08);
   --border-strong: rgba(0, 0, 0, 0.14);
 
+  /* 输入框的边框单独一套，比分隔线重得多 —— 分隔线只需要「暗示有边界」，
+     输入框的边框要**独自承担「这里可以填」**这个信息（白卡上底色和白卡
+     同为白色，只有边框能说话）。0.18 换算过来约等于 #d6d6d6，正是 GitHub
+     Primer 浅色主题那个 #d0d7de，不是随手估的。 */
+  --border-input: rgba(0, 0, 0, 0.18);
+  --border-input-hover: rgba(0, 0, 0, 0.32);
+
   /* 圆角与阴影 */
   --radius-sm: 8px;
   --radius: 14px;
@@ -60,6 +67,10 @@
     --warning: #ff9f0a;
     --border: rgba(255, 255, 255, 0.1);
     --border-strong: rgba(255, 255, 255, 0.18);
+    /* 暗色下输入框底色与卡片同为 #1c1c1e，边框是**唯一**的区分手段，
+       所以要比浅色那套给得更足一点。 */
+    --border-input: rgba(255, 255, 255, 0.22);
+    --border-input-hover: rgba(255, 255, 255, 0.36);
     --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
     --shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   }
@@ -153,36 +164,78 @@ label {
   letter-spacing: -0.01em;
 }
 
-input,
+/* 输入框**自己**要说明自己可以填，不能等用户点进去才知道。
+   原先这里是 `背景: --bg-sunken` + `边框: transparent`，而 `.segment`
+   与 `.asset` 这两块面板的背景**也是** `--bg-sunken` —— 同一个 #f5f5f7
+   加上全透明边框，输入框和它所在的容器差值为零，在屏幕上是真的看不见。
+   实测过：两者都是 rgb(245,245,247)，边框 rgba(0,0,0,0)。
+   现在底色抬到 elevated、边框用 --border-input：
+   白卡上靠边框（GitHub 就是这么做的），灰面板上底色直接跳出来 ——
+   一条规则同时管住两种情况，不用给每个容器打补丁。
+   注：`* { box-sizing: border-box }`，那条透明边框本来就占着 2px，
+   把 transparent 换成可见色不会改变任何盒子的尺寸。 */
+/* ⚠️ 必须把勾选框排除在外。这条 `width: 100%` 对文字输入框是对的，
+   但同一个选择器也会命中 `<input type="checkbox">` —— 方框被拉成整行宽
+   （实测 404px），边上的说明文字只剩 24px 宽，一句一行地折成 30 行、
+   435px 高。整张卡的留白全被这一个字撑坏，而**没有任何检查会报红**：
+   SSR 自检只看文字，端到端量的是 ✕ 与输入框的重叠。
+   排除掉之后，勾选框回到浏览器原生的方框（靠 `accent-color` 染色），
+   组件里也不必再记得补一句 `width: 16px`。 */
+input:not([type='checkbox']),
 select {
   width: 100%;
   font-family: inherit;
   font-size: 15px;
   color: var(--text);
-  background: var(--bg-sunken);
-  border: 1px solid transparent;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-input);
   border-radius: var(--radius-sm);
   padding: 9px 12px;
   transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
   font-variant-numeric: tabular-nums;
 }
 
-input:focus,
-select:focus {
-  outline: none;
-  background: var(--bg-elevated);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 18%, transparent);
+/* 指针扫过就加深 —— GitHub Primer 的输入框有 default / hover / focus 三套
+   状态变量，hover 是标准状态而不是可选项：它是「这个框能点」的第二次确认。 */
+input:not([type='checkbox']):hover:not(:disabled),
+select:hover:not(:disabled) {
+  border-color: var(--border-input-hover);
 }
 
-input:disabled {
+input:not([type='checkbox']):focus,
+select:focus {
+  outline: none;
+  /* 不再改底色 —— 休息态已经是 elevated 了，这里再写一次是句空话。 */
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+input:not([type='checkbox']):disabled {
   color: var(--text-tertiary);
   cursor: not-allowed;
 }
 
-input.invalid {
+/* 选择器必须带上 `:hover`。上面那条 hover 是 (0,2,1)，比单写 `input.invalid`
+   的 (0,1,1) 权重高 —— 只写 `input.invalid` 的话，鼠标一划过报错的框，
+   红边框就没了，正是最需要看见它的时候。 */
+input.invalid,
+input.invalid:hover {
   border-color: var(--negative);
   box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--negative) 15%, transparent);
+}
+
+/* 勾选框：原生方框 + 强调色染色，全站一处定义。
+   写在这里而不是各组件里 —— 之前 `SettingsInput` 与 `GoalInput` 各写一份，
+   后者漏了尺寸就被上面的 `width: 100%` 抓住，坏得无声无息。
+   同类控件的样子只该有一个出处。 */
+input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 /* 去掉数字输入框的上下箭头 —— Apple 风格里不出现 */

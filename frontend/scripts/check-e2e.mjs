@@ -787,20 +787,41 @@ const carryText = async () => {
 }
 const planAxis = async () => (await page.locator('.axis').innerText()).replace(/\s+/g, ' ')
 
+// head 行现在装的是「持续时间 + 定投频率」，两者都得给右上角的 ✕ 让路。
+// 「第 X – Y 月」已经挪到下面的读数行，不再参与这里的挤压判断。
 async function headGeometry(i = 0) {
   return page.evaluate((i) => {
     const seg = document.querySelectorAll('.segment')[i]
     if (!seg) return null
     const box = (el) => el.getBoundingClientRect()
-    const pair = box(seg.querySelector('.pair'))
-    const span = seg.querySelector('.span')
-    const btn = box(seg.querySelector('button.icon'))
-    const cr = box(seg.closest('.card'))
+    const dur = box(seg.querySelector('.duration'))
+    const freq = box(seg.querySelector('.freq'))
+    const close = box(seg.querySelector('.close'))
+    const meta = box(seg.querySelector('.meta'))
+    const segBox = box(seg)
+    // 真正的「互压」是**两个方向上都相交**。只比 X 区间是不够的 ——
+    // 上下两行的控件 X 区间本来就会重叠，那样比出来的红是假的。
+    const overlap = (a, b) =>
+      Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) > 0 &&
+      Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)) > 0
+    const sameLine = (a, b) =>
+      Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0
     return {
-      pairRight: Math.round(pair.right),
-      spanLeft: Math.round(box(span).left),
-      spanWidth: Math.round(box(span).width),
-      closeOverflow: Math.round(btn.right - cr.right),
+      durRight: Math.round(dur.right),
+      freqLeft: Math.round(freq.left),
+      freqRight: Math.round(freq.right),
+      closeLeft: Math.round(close.left),
+      durFreqOverlap: overlap(dur, freq),
+      freqCloseOverlap: overlap(freq, close),
+      // 「持续多久」和「多久投一次」是同一个问题的两半，得并排待着。
+      // 谁把频率挪回自己一行，这条立刻红。
+      durFreqSameLine: sameLine(dur, freq),
+      closeTop: Math.round(close.top - segBox.top),
+      closeRight: Math.round(segBox.right - close.right),
+      closeOverflow: Math.round(close.right - segBox.right),
+      // 读数行有没有被挤到折行（单行高 ≈ 19px，折了就翻倍）
+      metaHeight: Math.round(meta.height),
+      metaWidth: Math.round(meta.width),
     }
   }, i)
 }
@@ -884,17 +905,32 @@ ok(
   `${inv5} → ${inv10}，比值 ${ratio.toFixed(3)}`,
 )
 
-// —— 像素：两个面额框不能把右边那行月份区间挤没 ——
-for (const vp of [1440, 900]) {
+// —— 像素：head 行里的三个东西互不侵犯，✕ 待在右上角，读数行不折行 ——
+// `metaHeight <= 26` 是「单行」的判据：实测单行 19px，折一行就是 38px。
+const META_ONE_LINE_MAX = 26
+for (const vp of [1440, 1100, 900]) {
   await page.setViewportSize({ width: vp, height: 1000 })
   await page.waitForTimeout(250)
   const g = await headGeometry()
+  ok(`${vp}px：持续时间与定投频率不互压`, g !== null && !g.durFreqOverlap, JSON.stringify(g))
+  ok(`${vp}px：定投频率没钻到 ✕ 底下`, g !== null && !g.freqCloseOverlap, JSON.stringify(g))
+  // 「持续多久」和「多久投一次」是同一个问题的两半 —— 频率原先被顶到
+  // 另一行右侧，左边空出 124px，label 悬着单独成行，看着就是个飘着的标签。
+  ok(`${vp}px：定投频率与持续时间并排`, g !== null && g.durFreqSameLine, JSON.stringify(g))
+  // 这一条正是用户报的那个 bug：✕ 原先挂在 head 行行尾、距框顶 44px，
+  // 纵向中心和「持续时间」输入框只差 6px，于是被读成「清空这一格」。
+  // 判据就取「离右上角有多近」，位置一挪回去立刻红。
   ok(
-    `${vp}px：两个面额框没压住右边的月份区间`,
-    g !== null && g.pairRight <= g.spanLeft && g.spanWidth > 0,
-    JSON.stringify(g),
+    `${vp}px：✕ 贴在阶段框右上角`,
+    g !== null && g.closeTop <= 12 && g.closeRight <= 12,
+    g && `距顶 ${g.closeTop}px，距右 ${g.closeRight}px`,
   )
-  ok(`${vp}px：删除按钮没被顶出卡片`, g !== null && g.closeOverflow <= 0, g && `${g.closeOverflow}px`)
+  ok(`${vp}px：✕ 没被顶出阶段框`, g !== null && g.closeOverflow <= 0, g && `${g.closeOverflow}px`)
+  ok(
+    `${vp}px：读数行没被挤到折行`,
+    g !== null && g.metaHeight <= META_ONE_LINE_MAX,
+    g && `高 ${g.metaHeight}px（单行约 19px），宽 ${g.metaWidth}px`,
+  )
 }
 await page.setViewportSize({ width: 1440, height: 1000 })
 
@@ -1062,6 +1098,108 @@ ok(
   tw !== null && tw.tailGap === tw.cardPadBottom,
   tw && `轴后 ${tw.tailGap}px，卡片内边距 ${tw.cardPadBottom}px`,
 )
+
+// ══ ⑰ 输入框在休息态就得看得出来「这里能填」 ═══════════════════════
+//
+// 踩过的坑：app.css 里输入框是 `背景: --bg-sunken` + `边框: transparent`，
+// 而 `.segment`（定投阶段卡）和 `.asset`（标的卡）的背景**也是** --bg-sunken。
+// 实测两者都是 rgb(245,245,247)，边框 rgba(0,0,0,0) —— **差值为零**，
+// 输入框在屏幕上真的不存在。用户的说法是「所有数字都融入背景里了」，
+// 实际比"融入"更彻底：得先点一下才知道那里能填。
+//
+// 判据两条，缺一不可：
+//   ① 边框一律可见 —— 这是唯一在**所有**容器上都成立的手段
+//      （白卡上输入框底色和白卡同为白色，只有边框能说话）；
+//   ② 坐在灰面板上的输入框，底色必须和面板**不同** —— 否则「浮起来」
+//      这层意思就没了，只剩一条线撑着。
+// 修复前这两条都是红的，那正是它们存在的意义。
+async function inputAffordance() {
+  return page.evaluate(() => {
+    const parse = (c) => (c.match(/[\d.]+/g) || []).map(Number)
+    const opaque = (c) => {
+      const n = parse(c)
+      return n.length >= 3 && (n[3] === undefined || n[3] > 0.9)
+    }
+    const alphaOf = (c) => {
+      const n = parse(c)
+      return n.length === 4 ? n[3] : 1
+    }
+    // --bg-sunken 是个十六进制令牌，计算样式给的是 rgb() —— 换算一次再比，
+    // 否则字符串永远不等，这条断言会变成恒真的摆设。
+    const sunken = getComputedStyle(document.documentElement).getPropertyValue('--bg-sunken').trim()
+    const probe = document.createElement('div')
+    probe.style.color = sunken
+    document.body.appendChild(probe)
+    const sunkenRgb = getComputedStyle(probe).color
+    probe.remove()
+
+    const hostOf = (el) => {
+      let h = el.parentElement
+      while (h) {
+        const bg = getComputedStyle(h).backgroundColor
+        if (opaque(bg)) return bg
+        h = h.parentElement
+      }
+      return null
+    }
+
+    const noBorder = []
+    const flatOnPanel = []
+    let total = 0
+    // 只查**要打字进去**的控件。勾选框 / 单选框走 `appearance: auto`，
+    // 由浏览器画那个原生方框（SettingsInput 的 `.check input` 就是靠
+    // accent-color 染色的），它自带的chrome 已经说明了可点，不需要边框 ——
+    // 把它算进来是拿错了尺子，会得到一条永远修不好的假红。
+    const FIELDS = "input:not([type='checkbox']):not([type='radio']), select"
+    for (const el of document.querySelectorAll(FIELDS)) {
+      total++
+      const cs = getComputedStyle(el)
+      const name = el.id || el.getAttribute('aria-label') || el.className || el.tagName
+      if (parseFloat(cs.borderTopWidth) < 1 || alphaOf(cs.borderTopColor) === 0) noBorder.push(name)
+      if (hostOf(el) === sunkenRgb && cs.backgroundColor === sunkenRgb) flatOnPanel.push(name)
+    }
+    return { total, sunkenRgb, noBorder, flatOnPanel }
+  })
+}
+
+const aff = await inputAffordance()
+// 先确认扫到了东西 —— 选择器写错时循环为空，下面两条会**恒绿**，
+// 这正是本项目栽过跟头的那类假绿。
+ok(
+  '扫到了全页的输入框（下面两条不是空转）',
+  aff.total >= 20,
+  `${aff.total} 个，灰面板色 ${aff.sunkenRgb}`,
+)
+ok(
+  '没有边框透明的输入框 —— 不用点也知道能填',
+  aff.noBorder.length === 0,
+  aff.noBorder.join(' | ') || `全 ${aff.total} 个都可见`,
+)
+ok(
+  '坐在灰面板上的输入框底色与面板不同（真的浮起来）',
+  aff.flatOnPanel.length === 0,
+  aff.flatOnPanel.join(' | ') || '无',
+)
+
+// 全页不许出现横向滚动 —— 全局改了输入框边框宽度，窄容器有可能被撑出去。
+async function pageOverflowX() {
+  return page.evaluate(() => ({
+    x: Math.round(document.documentElement.scrollWidth - document.documentElement.clientWidth),
+    widest: [...document.querySelectorAll('input, select')]
+      .map((el) => Math.round(el.getBoundingClientRect().right))
+      .reduce((a, b) => Math.max(a, b), 0),
+    viewport: document.documentElement.clientWidth,
+  }))
+}
+
+for (const vp of [1440, 1100, 900]) {
+  await page.setViewportSize({ width: vp, height: 1000 })
+  await page.waitForTimeout(250)
+  const o = await pageOverflowX()
+  ok(`${vp}px：全页没有横向溢出`, o.x <= 0, `溢出 ${o.x}px（最右的输入框到 ${o.widest}，视口 ${o.viewport}）`)
+}
+await page.setViewportSize({ width: 1440, height: 1000 })
+
 
 // ══ 收尾 ═════════════════════════════════════════════════════════
 ok('全程无控制台报错', consoleErrors.length === 0, consoleErrors.slice(0, 3).join(' | '))

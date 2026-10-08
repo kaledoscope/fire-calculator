@@ -191,43 +191,6 @@
             </div>
           </div>
 
-          <div class="span tiny">
-            {#if span}{monthLabel(span.start, span.end)}{/if}
-          </div>
-
-          <button class="icon" onclick={() => removeSegment(i)} title="删除阶段">✕</button>
-        </div>
-
-        {#if carryNote(i)}
-          <!-- 年、月各填各的，没进位也照收 —— 但实际是多少必须当场说清，
-               否则「7 年 25 个月」到底算多久全靠用户自己脑补。 -->
-          <p class="tiny carry">
-            实际 <strong>{carryNote(i)}</strong>（{monthsOf(seg).toLocaleString('en-US')} 个月）
-          </p>
-        {:else if monthsOf(seg) === 0}
-          <p class="tiny carry">至少填 1 个月</p>
-        {/if}
-
-        <div class="controls">
-          <div class="mode">
-            <button
-              class="tab"
-              class:active={seg.total == null}
-              onclick={() => {
-                seg.total = null
-                if (!seg.monthly) seg.monthly = {}
-              }}>逐标的填写</button
-            >
-            <button
-              class="tab"
-              class:active={seg.total != null}
-              onclick={() => {
-                seg.total = seg.total ?? 2000
-                seg.monthly = {}
-              }}>只填总额</button
-            >
-          </div>
-
           <div class="field freq">
             <label for="sf-{i}">定投频率</label>
             <div class="pair">
@@ -245,6 +208,52 @@
               <span class="unit">个月一次</span>
             </div>
           </div>
+
+          <!-- ✕ 绝对定位到阶段框的右上角，见 <style> 里的注释 -->
+          <button class="icon close" onclick={() => removeSegment(i)} title="删除这个阶段">✕</button>
+        </div>
+
+        <!-- 推算出来的读数单独一行，不跟上面的设置项抢地方。
+             「第 1 – 120 月」和「实际 9 年 1 个月」是同一类东西 ——
+             都是「你填的那个数意味着什么」，本就该挨着看。
+             挤在 head 行里的话，1440px 下它只剩 40px 宽，会折成两行。 -->
+        <p class="tiny meta">
+          {#if span && span.end > span.start}
+            <span>{monthLabel(span.start, span.end)}</span>
+          {/if}
+          {#if carryNote(i)}
+            <!-- 年、月各填各的，没进位也照收 —— 但实际是多少必须当场说清，
+                 否则「7 年 25 个月」到底算多久全靠用户自己脑补。 -->
+            <span class="carry"
+              >实际 <strong>{carryNote(i)}</strong>（{monthsOf(seg).toLocaleString('en-US')} 个月）</span
+            >
+          {:else if monthsOf(seg) === 0}
+            <span class="carry">至少填 1 个月</span>
+          {/if}
+        </p>
+
+        <!-- 「填法」直接坐在它要控制的那几个金额框上方。
+             原先它和「定投频率」挤在一行用 space-between 顶到两边，
+             中间空出 124px，频率的 label 还悬在自己输入框上方单独成行 ——
+             看着就是一个标签飘在空白里。现在频率归到 head 行和「持续时间」
+             作伴（两者都是「这笔钱投多久 / 多久投一次」），这行只剩填法。 -->
+        <div class="mode">
+          <button
+            class="tab"
+            class:active={seg.total == null}
+            onclick={() => {
+              seg.total = null
+              if (!seg.monthly) seg.monthly = {}
+            }}>逐标的填写</button
+          >
+          <button
+            class="tab"
+            class:active={seg.total != null}
+            onclick={() => {
+              seg.total = seg.total ?? 2000
+              seg.monthly = {}
+            }}>只填总额</button
+          >
         </div>
 
         {#if seg.total != null}
@@ -312,10 +321,33 @@
     background: var(--bg-sunken);
     border-radius: var(--radius);
     padding: var(--gap-sm);
+    /* ✕ 的定位基准 —— 它是相对阶段框、不是相对 head 行放右上角的。 */
+    position: relative;
   }
 
   .head {
     align-items: flex-end;
+    /* 给右上角的 ✕ 让位。不让的话，「第 1 – 120 月」会一路铺到 ✕ 底下。 */
+    padding-right: 30px;
+  }
+
+  /* ✕ 放阶段框的**右上角**，不放 head 行的行尾。
+     原先它是 head 行的最后一个元素，实测距框顶 44px、纵向中心和「持续时间」
+     输入框只差 6px —— 和 `[10] 年 [0] 个月` 同处一行，于是被读成
+     「清空持续时间」，一点下去整个阶段没了。放右上角才是「移除这张卡」
+     的通用位置（和卡片自己的折叠箭头同一个角）。
+     形状也照 Card 的 .chevron 收成圆形，两张卡上的右上角控件手感一致。 */
+  .close {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 14px;
   }
 
   /* 两个面额框 + 单位，宽度按内容定死 —— 让 `.span` 独占剩下的空间。
@@ -343,30 +375,24 @@
     white-space: nowrap;
   }
 
-  .carry {
+  /* 读数行：各段之间用中点隔开，两段都缺时整行不占位。 */
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 10px;
     margin-top: 6px;
     color: var(--text-secondary);
   }
 
-  .span {
-    flex: 1;
-    padding-bottom: 10px;
-    color: var(--text-secondary);
+  .meta > span + span::before {
+    content: '·';
+    margin-right: 10px;
+    color: var(--text-tertiary);
   }
 
-  /* 「填法」和「定投频率」同处一行 —— 两者都是「怎么投」，本来就该挨着。
-     分两行的话每段白白多出一行高度，而这一行右侧本来就是空的。
-     纵向间距挪到 .controls 上：留在 .mode 上的话，它带着下外边距去和
-     频率框按基线对齐，两个控件会差半个身位。 */
-  .controls {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: var(--gap-sm);
-    flex-wrap: wrap;
-    margin: var(--gap-sm) 0;
-  }
-
+  /* 「填法」直接坐在金额框上方 —— 它切换的就是下面那几格的形式，
+     挨着才看得出管的是谁。 */
   .mode {
     display: flex;
     gap: 2px;
@@ -374,9 +400,11 @@
     border-radius: 8px;
     padding: 2px;
     width: fit-content;
+    margin: var(--gap-sm) 0;
   }
 
-  /* 频率框按内容定宽，别跟着弹性盒伸开 */
+  /* 持续时间与频率都按内容定宽，别跟着弹性盒伸开 ——
+     剩下的宽度留给「第 X – Y 月」。 */
   .freq {
     flex: 0 0 auto;
   }

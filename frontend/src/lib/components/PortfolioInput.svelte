@@ -319,7 +319,9 @@
             <input id="p-{i}" type="number" step="any" min="0" bind:value={asset.price} />
           </div>
 
-          <button class="icon" onclick={() => removeAsset(i)} title="删除">✕</button>
+          <!-- ✕ 绝对定位到标的卡的右上角，和定投计划的阶段卡一致 ——
+               同类控件在不同卡片里位置不同，本身就是一种要猜的负担。 -->
+          <button class="icon close" onclick={() => removeAsset(i)} title="删除这个标的">✕</button>
         </div>
 
         <div class="row sub">
@@ -556,6 +558,8 @@
     background: var(--bg-sunken);
     border-radius: var(--radius);
     padding: var(--gap-sm) var(--gap-sm) 8px;
+    /* ✕ 的定位基准 */
+    position: relative;
   }
 
   .asset.invalid {
@@ -564,6 +568,23 @@
 
   .main {
     align-items: flex-end;
+    /* 给右上角的 ✕ 让位 */
+    padding-right: 30px;
+  }
+
+  /* 与 PlanInput 的 .close 同一套：右上角、圆形、悬停转红（转红来自
+     app.css 里 button.icon:hover）。两处位置一致，用户不用分别记。 */
+  .close {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 14px;
   }
 
   /* 标的代码不可能超过 5 位，照内容定宽就好。
